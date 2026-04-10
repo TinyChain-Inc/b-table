@@ -1,6 +1,5 @@
 use std::fmt;
 
-use async_trait::async_trait;
 use b_tree::collate::Collate;
 use b_tree::Key;
 use destream::de;
@@ -14,7 +13,6 @@ struct TableVisitor<S, IS, C, FE> {
     table: TableLock<S, IS, C, FE>,
 }
 
-#[async_trait]
 impl<S, IS, C, FE> de::Visitor for TableVisitor<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
@@ -55,7 +53,6 @@ where
     }
 }
 
-#[async_trait]
 impl<S, IS, C, FE> de::FromStream for TableLock<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,

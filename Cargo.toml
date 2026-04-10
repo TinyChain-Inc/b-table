@@ -2,7 +2,7 @@
 name = "b-table"
 version = "0.3.0"
 authors = ["code@tinychain.net"]
-edition = "2021"
+edition = "2024"
 description = "A persistent database table based on b-tree"
 license = "Apache-2.0"
 readme = "README.md"
@@ -14,14 +14,13 @@ categories = ["database", "database-implementations", "data-structures"]
 [features]
 all = ["logging", "stream"]
 logging = ["log", "b-tree/logging", "freqfs/logging"]
-stream = ["async-trait", "b-tree/stream", "destream/smallvec"]
+stream = ["b-tree/stream", "destream/smallvec"]
 
 [[example]]
 name = "example"
 required-features = ["stream"]
 
 [dependencies]
-async-trait = { version = "0.1", optional = true }
 b-tree = "0.4"
 destream = { version = "0.8", optional = true }
 freqfs = "0.10"
