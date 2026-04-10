@@ -35,5 +35,5 @@ smallvec = "1.13"
 destream = "0.8"
 destream_json = { version = "0.13", features = ["value"] }
 number-general = "0.12"
-rand = "0.8"
+rand = "0.10"
 tokio = { version = "1.39", features = ["macros"] }

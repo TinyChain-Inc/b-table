@@ -10,7 +10,7 @@ use destream_json::Value;
 use freqfs::Cache;
 use futures::TryStreamExt;
 use number_general::NumberCollator;
-use rand::Rng;
+use rand::RngExt;
 use safecast::as_type;
 use tokio::fs;
 
@@ -174,9 +174,9 @@ impl b_table::Schema for TableSchema {
 }
 
 async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     loop {
-        let rand: u32 = rng.gen();
+        let rand: u32 = rng.random();
         let path = PathBuf::from(format!("/tmp/test_table_{}", rand));
         if !path.exists() {
             fs::create_dir(&path).await?;
