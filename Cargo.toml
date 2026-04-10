@@ -26,14 +26,14 @@ destream = { version = "0.10", optional = true }
 freqfs = "0.12"
 futures = "0.3"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
-num_cpus = "1.16"
+num_cpus = "1.17"
 pin-project = "1.1"
 safecast = "0.2"
-smallvec = "1.13"
+smallvec = "1.15"
 
 [dev-dependencies]
 destream = "0.10"
 destream_json = { version = "0.15", features = ["value"] }
 number-general = "0.14"
 rand = "0.10"
-tokio = { version = "1.39", features = ["macros"] }
+tokio = { version = "1.51", features = ["macros"] }
