@@ -330,6 +330,10 @@ mod test {
             self.columns.len()
         }
 
+        fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+
         fn order(&self) -> usize {
             10
         }

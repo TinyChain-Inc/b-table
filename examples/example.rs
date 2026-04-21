@@ -96,6 +96,10 @@ impl BTreeSchema for IndexSchema {
             ))
         }
     }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl IndexSchemaInstance for IndexSchema {
