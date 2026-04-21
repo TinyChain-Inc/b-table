@@ -21,7 +21,7 @@ name = "example"
 required-features = ["stream"]
 
 [dependencies]
-b-tree = "0.4"
+b-tree = "0.5"
 destream = { version = "0.10", optional = true }
 freqfs = "0.12"
 futures = "0.3"
