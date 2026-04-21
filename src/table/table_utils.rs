@@ -163,7 +163,7 @@ pub(super) fn index_range_borrow<'a, K: Eq + Hash, V>(
 }
 
 #[inline]
-pub(super) fn index_range_for<'a, K: Eq + Hash, V>(
+pub(super) fn index_range_for<K: Eq + Hash, V>(
     columns: &[K],
     range: &mut HashMap<K, ColumnRange<V>>,
 ) -> b_tree::Range<V> {
@@ -226,7 +226,7 @@ where
     debug_assert!(columns_out.len() <= columns_in.len());
     debug_assert!(!columns_out.is_empty());
     debug_assert!(
-        columns_out.iter().all(|id| columns_in.contains(&id)),
+        columns_out.iter().all(|id| columns_in.contains(id)),
         "{columns_out:?} is not a subset of {columns_in:?}"
     );
 

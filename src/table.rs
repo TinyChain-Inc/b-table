@@ -98,9 +98,9 @@ where
         let key_len = self.schema.key().len();
 
         if key.len() == key_len {
-            self.state.get_row(&key).await
+            self.state.get_row(key).await
         } else {
-            Err(bad_key(&key, key_len))
+            Err(bad_key(key, key_len))
         }
     }
 
@@ -196,7 +196,7 @@ where
         if key.len() == key_len {
             self.state.delete_row(key).await
         } else {
-            Err(bad_key(&key, key_len))
+            Err(bad_key(key, key_len))
         }
     }
 
@@ -232,8 +232,7 @@ where
                     "cannot delete the contents of a table with schema {:?} from one with schema {:?}",
                     other.schema.inner(), self.schema.inner()
                 ),
-            )
-            .into());
+            ));
         }
 
         self.state.delete_all(other.state).await
@@ -256,8 +255,7 @@ where
                     other.schema.inner(),
                     self.schema.inner()
                 ),
-            )
-            .into());
+            ));
         }
 
         self.state.merge(other.state).await

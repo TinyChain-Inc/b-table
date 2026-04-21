@@ -10,16 +10,11 @@ use crate::plan::QueryPlan;
 pub use b_tree::Schema as BTreeSchema;
 
 /// An ID type used to look up a specific table index
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Default)]
 pub enum IndexId<'a> {
+    #[default]
     Primary,
     Auxiliary(&'a str),
-}
-
-impl<'a> Default for IndexId<'a> {
-    fn default() -> Self {
-        Self::Primary
-    }
 }
 
 impl<'a> From<&'a str> for IndexId<'a> {
@@ -207,6 +202,10 @@ impl<K, V> Range<K, V> {
     pub fn len(&self) -> usize {
         self.columns.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<K: Eq + Hash, V> Range<K, V> {
@@ -344,7 +343,7 @@ impl<S: Schema> TableSchema<S> {
         order: &'a [S::Id],
         select: &'a [S::Id],
     ) -> Result<QueryPlan<'a, S::Id>, io::Error> {
-        QueryPlan::new(self, &range, order, select).ok_or_else(|| {
+        QueryPlan::new(self, range, order, select).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(

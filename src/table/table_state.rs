@@ -12,6 +12,8 @@ use crate::plan::QueryPlan;
 use crate::schema::{IndexId, IndexSchema, Range};
 use crate::{ColumnRange, IndexStack, Node, Row, Rows};
 
+type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
+
 use super::table_utils::{
     borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
     inner_range_for, prefix_extractor,
@@ -102,7 +104,7 @@ where
 
             columns = index.schema().columns();
 
-            let index_range = index_range_borrow(&columns, range);
+            let index_range = index_range_borrow(columns, range);
 
             first = if let Some(key) = index.first(index_range).await? {
                 key
@@ -177,7 +179,7 @@ where
         #[cfg(feature = "logging")]
         log::debug!("construct row stream with plan {plan:?}");
 
-        let mut keys: Option<(b_tree::Keys<IS::Value>, &'a [IS::Id])> = None;
+        let mut keys: Option<KeyStream<'a, IS::Value, IS::Id>> = None;
 
         let last_query = plan.indices.pop();
 
@@ -220,7 +222,7 @@ where
 
             let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
 
-            let inner_range = inner_range_for(&query, &mut range);
+            let inner_range = inner_range_for(&query, &range);
 
             let n = columns_out.len();
             let index = index.clone();
@@ -262,7 +264,7 @@ where
 
                 let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
 
-                let inner_range = inner_range_for(&query, &mut range);
+                let inner_range = inner_range_for(&query, & range);
 
                 let index = index.clone();
 
