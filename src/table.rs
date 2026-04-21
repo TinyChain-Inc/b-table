@@ -2,23 +2,19 @@ mod table_lock;
 mod table_state;
 mod table_utils;
 
-use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{fmt, io, mem};
+use std::{fmt, io};
 
 use b_tree::collate::Collate;
-use b_tree::{BTree, BTreeLock, Key};
-use freqfs::{DirDeref, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
-use futures::future::{try_join_all, TryFutureExt};
-use futures::stream::{Stream, TryStreamExt};
+use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
+use futures::future::TryFutureExt;
+use futures::stream::Stream;
 use safecast::AsType;
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 
-use super::plan::{IndexQuery, QueryPlan};
-use super::schema::{Schema, TableSchema, Range, IndexSchema};
-use super::{IndexStack, Node};
+use super::schema::{IndexSchema, Range, Schema, TableSchema};
+use super::Node;
 
 use table_state::TableState;
 use table_utils::bad_key;

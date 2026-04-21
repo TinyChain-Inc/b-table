@@ -1,24 +1,30 @@
-use std::{fmt, io, mem};
-use std::hash::Hash;
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::{fmt, io, mem};
 
 use b_tree::Key;
 use smallvec::smallvec;
 
 use crate::IndexStack;
 use crate::plan::IndexQuery;
-use crate::schema::{Schema, IndexSchema, ColumnRange};
+use crate::schema::{ColumnRange, IndexSchema, Schema};
 
 #[inline]
-pub(super) fn borrow_columns<'a, K, V>(row: &'a [V], columns_in: &[K], columns_out: &[K]) -> Key<&'a V>
+pub(super) fn borrow_columns<'a, K, V>(
+    row: &'a [V],
+    columns_in: &[K],
+    columns_out: &[K],
+) -> Key<&'a V>
 where
     K: Eq,
 {
     assert_eq!(row.len(), columns_in.len());
 
-    debug_assert!(columns_out
-        .iter()
-        .all(|col_name| columns_in.contains(col_name)));
+    debug_assert!(
+        columns_out
+            .iter()
+            .all(|col_name| columns_in.contains(col_name))
+    );
 
     columns_out
         .iter()
@@ -35,9 +41,11 @@ where
 {
     assert_eq!(row.len(), columns_in.len());
 
-    debug_assert!(columns_out
-        .iter()
-        .all(|col_name| columns_in.contains(col_name)));
+    debug_assert!(
+        columns_out
+            .iter()
+            .all(|col_name| columns_in.contains(col_name))
+    );
 
     columns_out
         .iter()
@@ -207,7 +215,10 @@ where
     inner_range
 }
 
-pub(super) fn prefix_extractor<K, V>(columns_in: &[K], columns_out: &[K]) -> impl Fn(Key<V>) -> Key<V> + Send
+pub(super) fn prefix_extractor<K, V>(
+    columns_in: &[K],
+    columns_out: &[K],
+) -> impl Fn(Key<V>) -> Key<V> + Send + 'static
 where
     K: PartialEq + fmt::Debug,
     V: Default + Clone,

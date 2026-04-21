@@ -4,16 +4,18 @@ use std::{fmt, io};
 
 use b_tree::{BTree, collate::Collate};
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
-use safecast::AsType;
 use futures::future::{self, TryFutureExt};
 use futures::stream::TryStreamExt;
+use safecast::AsType;
 
-use crate::{Node, Row, ColumnRange, Rows, IndexStack};
 use crate::plan::QueryPlan;
 use crate::schema::{IndexId, IndexSchema, Range};
+use crate::{ColumnRange, IndexStack, Node, Row, Rows};
 
-use super::table_utils::{index_range_borrow, extract_columns, index_range_for, prefix_extractor, inner_range_for, borrow_columns, clone_columns};
-
+use super::table_utils::{
+    borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
+    inner_range_for, prefix_extractor,
+};
 
 pub(super) struct TableState<IS, C, G> {
     // IMPORTANT! the auxiliary field must go before primary so that it will be dropped first
@@ -55,7 +57,10 @@ where
         self.primary.contains(prefix).await
     }
 
-    pub(super) async fn get_row(&self, key: &[IS::Value]) -> Result<Option<Row<IS::Value>>, io::Error> {
+    pub(super) async fn get_row(
+        &self,
+        key: &[IS::Value],
+    ) -> Result<Option<Row<IS::Value>>, io::Error> {
         self.primary.first(b_tree::Range::from_prefix(key)).await
     }
 
@@ -206,10 +211,12 @@ where
             assert!(columns_out.len() > columns_in.len());
             assert!(query.range().iter().zip(columns_out).all(|(r, c)| *r == c));
 
-            debug_assert!(columns_out
-                .iter()
-                .take(columns_in.len())
-                .all(|c| columns_in.contains(c)));
+            debug_assert!(
+                columns_out
+                    .iter()
+                    .take(columns_in.len())
+                    .all(|c| columns_in.contains(c))
+            );
 
             let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
 
@@ -246,10 +253,12 @@ where
                     "cannot select {columns_out:?} with prefix {columns_in:?}"
                 );
 
-                debug_assert!(columns_out
-                    .iter()
-                    .take(columns_in.len())
-                    .all(|c| columns_in.contains(c)));
+                debug_assert!(
+                    columns_out
+                        .iter()
+                        .take(columns_in.len())
+                        .all(|c| columns_in.contains(c))
+                );
 
                 let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
 
@@ -262,12 +271,12 @@ where
                     .map_ok(move |prefix| inner_range.clone().prepend(prefix))
                     .map_ok(move |index_range| {
                         let index = index.clone();
-                        async move { 
-                            if reverse { 
-                                index.keys_rev(index_range).await 
+                        async move {
+                            if reverse {
+                                index.keys_rev(index_range).await
                             } else {
-                                index.keys(index_range).await 
-                            } 
+                                index.keys(index_range).await
+                            }
                         }
                     })
                     .try_buffered(num_cpus::get())
@@ -281,7 +290,7 @@ where
                 let index_range = index_range_for(columns, &mut range);
                 assert!(range.is_empty());
 
-                let index_keys = if reverse { 
+                let index_keys = if reverse {
                     index.clone().keys_rev(index_range).await?
                 } else {
                     index.clone().keys(index_range).await?
@@ -386,7 +395,10 @@ where
         Ok(deleted)
     }
 
-    pub(super) async fn delete_all<OG>(&mut self, mut other: TableState<IS, C, OG>) -> Result<(), io::Error>
+    pub(super) async fn delete_all<OG>(
+        &mut self,
+        mut other: TableState<IS, C, OG>,
+    ) -> Result<(), io::Error>
     where
         OG: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {
@@ -404,7 +416,10 @@ where
         Ok(())
     }
 
-    pub(super) async fn merge<OG>(&mut self, mut other: TableState<IS, C, OG>) -> Result<(), io::Error>
+    pub(super) async fn merge<OG>(
+        &mut self,
+        mut other: TableState<IS, C, OG>,
+    ) -> Result<(), io::Error>
     where
         OG: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {

@@ -332,7 +332,7 @@ impl<S: Schema> TableSchema<S> {
         }
     }
 
-    pub fn index_ids(&self) -> impl Iterator<Item = IndexId> {
+    pub fn index_ids(&self) -> impl Iterator<Item = IndexId<'_>> {
         let aux = self.inner.auxiliary().iter().map(|(name, _)| name.into());
 
         iter::once(IndexId::Primary).chain(aux)

@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::Hash;
 
 use super::schema::*;
-use super::{Columns, IndexStack, INDEX_STACK_SIZE, ROW_STACK_SIZE};
+use super::{Columns, INDEX_STACK_SIZE, IndexStack, ROW_STACK_SIZE};
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct IndexQuery<'a, K> {

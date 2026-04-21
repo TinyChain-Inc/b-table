@@ -1,18 +1,17 @@
-use std::sync::Arc;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::sync::Arc;
 
-use freqfs::{DirLock, FileLoad, FileSave};
 use b_tree::BTreeLock;
+use freqfs::{DirLock, FileLoad, FileSave};
 use safecast::AsType;
 
 use crate::Node;
-use crate::schema::{TableSchema, Schema};
+use crate::schema::{Schema, TableSchema};
 
-use super::{PRIMARY, TableWriteGuard, TableReadGuard, Table};
-use super::table_utils::valid_schema;
 use super::table_state::TableState;
-
+use super::table_utils::valid_schema;
+use super::{PRIMARY, Table, TableReadGuard, TableWriteGuard};
 
 /// A futures-aware read-write lock on a [`Table`]
 pub struct TableLock<S, IS, C, FE> {

@@ -1,7 +1,7 @@
 use std::fmt;
 
-use b_tree::collate::Collate;
 use b_tree::Key;
+use b_tree::collate::Collate;
 use destream::de;
 use freqfs::{DirLock, FileLoad};
 use futures::TryFutureExt;
@@ -19,6 +19,7 @@ where
     IS: b_tree::Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad + fmt::Debug,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -59,6 +60,7 @@ where
     IS: b_tree::Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad + fmt::Debug,
     Range<S::Id, S::Value>: fmt::Debug,
