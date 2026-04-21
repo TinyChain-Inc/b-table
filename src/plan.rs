@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::Hash;
 
 use super::schema::*;
-use super::{Columns, IndexStack, INDEX_STACK_SIZE, ROW_STACK_SIZE};
+use super::{Columns, INDEX_STACK_SIZE, IndexStack, ROW_STACK_SIZE};
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct IndexQuery<'a, K> {
@@ -157,6 +157,7 @@ impl<'a, K: Clone + Eq + Hash + fmt::Debug> QueryPlan<'a, K> {
         clone
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn needs<S>(
         &self,
         schema: &'a TableSchema<S>,
@@ -203,10 +204,10 @@ impl<'a, K: Clone + Eq + Hash + fmt::Debug> QueryPlan<'a, K> {
 
         let mut covered_range = Columns::with_capacity(index.len());
         for (i, col_name) in index.columns()[present..].iter().enumerate() {
-            if let Some(order_col) = order.get(supported_order.len() + i) {
-                if col_name != order_col {
-                    break;
-                }
+            if let Some(order_col) = order.get(supported_order.len() + i)
+                && col_name != order_col
+            {
+                break;
             }
 
             if supported_range.contains(&col_name) {
@@ -222,7 +223,7 @@ impl<'a, K: Clone + Eq + Hash + fmt::Debug> QueryPlan<'a, K> {
             }
         }
 
-        for i in (present..index.len()).into_iter().map(|i| i + 1) {
+        for i in (present..index.len()).map(|i| i + 1) {
             let index_order = &index.columns()[present..i];
 
             let covered_order = index_order
@@ -328,6 +329,10 @@ mod test {
 
         fn len(&self) -> usize {
             self.columns.len()
+        }
+
+        fn is_empty(&self) -> bool {
+            self.len() == 0
         }
 
         fn order(&self) -> usize {

@@ -1,4 +1,4 @@
-pub use b_tree::{collate, Collator};
+pub use b_tree::{Collator, collate};
 pub use schema::*;
 pub use table::*;
 

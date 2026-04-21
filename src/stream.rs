@@ -1,8 +1,7 @@
 use std::fmt;
 
-use async_trait::async_trait;
-use b_tree::collate::Collate;
 use b_tree::Key;
+use b_tree::collate::Collate;
 use destream::de;
 use freqfs::{DirLock, FileLoad};
 use futures::TryFutureExt;
@@ -14,13 +13,13 @@ struct TableVisitor<S, IS, C, FE> {
     table: TableLock<S, IS, C, FE>,
 }
 
-#[async_trait]
 impl<S, IS, C, FE> de::Visitor for TableVisitor<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
     IS: b_tree::Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad + fmt::Debug,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -55,13 +54,13 @@ where
     }
 }
 
-#[async_trait]
 impl<S, IS, C, FE> de::FromStream for TableLock<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
     IS: b_tree::Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad + fmt::Debug,
     Range<S::Id, S::Value>: fmt::Debug,
