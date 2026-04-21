@@ -264,7 +264,7 @@ where
 
                 let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
 
-                let inner_range = inner_range_for(&query, & range);
+                let inner_range = inner_range_for(&query, &range);
 
                 let index = index.clone();
 

@@ -13,8 +13,8 @@ use futures::stream::Stream;
 use safecast::AsType;
 use smallvec::SmallVec;
 
-use super::schema::{IndexSchema, Range, Schema, TableSchema};
 use super::Node;
+use super::schema::{IndexSchema, Range, Schema, TableSchema};
 
 use table_state::TableState;
 use table_utils::bad_key;
@@ -230,7 +230,8 @@ where
                 io::ErrorKind::InvalidInput,
                 format!(
                     "cannot delete the contents of a table with schema {:?} from one with schema {:?}",
-                    other.schema.inner(), self.schema.inner()
+                    other.schema.inner(),
+                    self.schema.inner()
                 ),
             ));
         }

@@ -43,6 +43,7 @@ impl Collate for Collator {
     }
 }
 
+#[derive(Clone)]
 enum File {
     Node(Node<Value>),
 }
