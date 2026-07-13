@@ -204,10 +204,10 @@ impl<'a, K: Clone + Eq + Hash + fmt::Debug> QueryPlan<'a, K> {
 
         let mut covered_range = Columns::with_capacity(index.len());
         for (i, col_name) in index.columns()[present..].iter().enumerate() {
-            if let Some(order_col) = order.get(supported_order.len() + i)
-                && col_name != order_col
-            {
-                break;
+            if let Some(order_col) = order.get(supported_order.len() + i) {
+                if col_name != order_col {
+                    break;
+                }
             }
 
             if supported_range.contains(&col_name) {
@@ -329,10 +329,6 @@ mod test {
 
         fn len(&self) -> usize {
             self.columns.len()
-        }
-
-        fn is_empty(&self) -> bool {
-            self.len() == 0
         }
 
         fn order(&self) -> usize {
