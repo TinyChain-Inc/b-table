@@ -16,6 +16,29 @@ use tokio::fs;
 
 const BLOCK_SIZE: usize = 4_096;
 
+#[tokio::test]
+async fn load_requires_all_indexes() -> Result<(), io::Error> {
+    let schema = || {
+        TableSchema::new(
+            vec!["up", "up_name", "down", "down_name"],
+            [("down".into(), vec!["down", "up"])],
+        )
+    };
+    let path = setup_tmp_dir().await?;
+    let cache = Cache::<File>::new(64 * BLOCK_SIZE, None, 0, std::time::Duration::from_secs(3));
+    let root = cache.load(path)?;
+    assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
+    assert!(root.read().await.is_empty());
+    let table = TableLock::create(schema(), Collator::new(), root.clone())?;
+    table.sync().await?;
+    assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_ok());
+    drop(table);
+    root.write().await.delete("down").await;
+    assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
+    assert!(!root.read().await.contains("down"));
+    Ok(())
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Collator {
     string: collate::Collator<String>,

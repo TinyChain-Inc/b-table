@@ -1,6 +1,13 @@
 # b-table
 A persistent database table based on [b-tree](https://github.com/haydnv/b-tree), with support for multiple indices.
 
+`TableLock::create` requires empty delegated storage. `TableLock::load` requires
+the primary index and every schema-declared auxiliary index, including their
+BTree roots; missing indexes are errors. Synchronize initial canonical storage
+before relying on restart loading.
+
+Run `cargo test --all-targets --all-features` to include the strict-load example test.
+
 Example usage:
 ```rust
 use b_table::{Collator, Schema, TableLock};

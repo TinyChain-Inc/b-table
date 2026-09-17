@@ -61,6 +61,13 @@ where
 
         let mut dir_contents = dir.try_write()?;
 
+        if !dir_contents.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "creating a Table requires empty storage",
+            ));
+        }
+
         let primary = {
             let dir = dir_contents.create_dir(PRIMARY.to_string())?;
             BTreeLock::create(schema.primary().clone(), collator.clone(), dir)
@@ -90,17 +97,21 @@ where
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         valid_schema(&schema)?;
 
-        let mut dir_contents = dir.try_write()?;
+        let dir_contents = dir.try_read()?;
 
         let primary = {
-            let dir = dir_contents.get_or_create_dir(PRIMARY.to_string())?;
+            let dir = dir_contents.get_dir(PRIMARY).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing Table primary index")
+            })?;
             BTreeLock::load(schema.primary().clone(), collator.clone(), dir.clone())
         }?;
 
         let mut auxiliary = BTreeMap::new();
         for (name, schema) in schema.auxiliary() {
             let index = {
-                let dir = dir_contents.get_or_create_dir(name.clone())?;
+                let dir = dir_contents.get_dir(name).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "missing Table auxiliary index")
+                })?;
                 BTreeLock::load(schema.clone(), collator.clone(), dir.clone())
             }?;
 
@@ -119,9 +130,17 @@ where
 
     pub async fn sync(&self) -> Result<(), io::Error>
     where
-        FE: for<'a> FileSave + Clone,
+        FE: FileSave + Clone,
     {
         self.dir.sync().await
+    }
+
+    /// Explicitly synchronize this table's backing storage durably.
+    pub async fn sync_all(&self) -> Result<(), io::Error>
+    where
+        FE: FileSave + Clone,
+    {
+        self.dir.sync_all().await
     }
 }
 
