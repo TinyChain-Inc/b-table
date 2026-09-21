@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use b_table::collate::{self, Collate};
 use b_table::{BTreeSchema, IndexSchema as IndexSchemaInstance, Node, Range, TableLock};
-use destream::en;
+use destream::{de, en};
 use destream_json::Value;
 use freqfs::Cache;
 use futures::TryStreamExt;
@@ -69,6 +69,13 @@ impl Collate for Collator {
 #[derive(Clone)]
 enum File {
     Node(Node<Value>),
+}
+
+impl de::FromStream for File {
+    type Context = ();
+    async fn from_stream<D: de::Decoder>(cxt: (), decoder: &mut D) -> Result<Self, D::Error> {
+        Node::from_stream(cxt, decoder).await.map(Self::Node)
+    }
 }
 
 impl<'en> en::ToStream<'en> for File {
@@ -397,4 +404,29 @@ async fn main() -> Result<(), io::Error> {
 
     // clean up
     fs::remove_dir_all(path).await
+}
+
+impl freqfs::FileLoad for File {
+    async fn load(
+        _: &std::path::Path,
+        file: tokio::fs::File,
+        _: std::fs::Metadata,
+    ) -> std::io::Result<Self> {
+        tbon::de::read_from((), file)
+            .await
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+}
+impl freqfs::FileSave for File {
+    async fn save(&self, file: &mut tokio::fs::File) -> std::io::Result<u64> {
+        use futures::TryStreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tbon::en::encode(self).map_err(std::io::Error::other)?;
+        let mut size = 0;
+        while let Some(chunk) = stream.try_next().await.map_err(std::io::Error::other)? {
+            file.write_all(&chunk).await?;
+            size += chunk.len() as u64;
+        }
+        Ok(size)
+    }
 }

@@ -50,3 +50,14 @@ expected_row.extend(value);
     assert_eq!(rows.try_next().await, Ok(Some(expected_row)));
 }
 ```
+
+## Filesystem codecs
+
+File entries implement `freqfs::FileLoad` and `FileSave`. Loads reconstruct the
+same entry type that saves write; typed access validates the resulting entry via
+`AsType`. Adapters must preserve payload identity across persistence rather than
+reinterpret bytes as whichever type a reader requests.
+
+The `stream` feature supplies destream implementations without selecting a byte
+codec. Applications implement `FileLoad`/`FileSave` for their file entry type
+using their chosen codec. The examples choose TBON explicitly.

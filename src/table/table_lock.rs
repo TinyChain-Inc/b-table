@@ -52,8 +52,7 @@ impl<S, C, FE> TableLock<S, S::Index, C, FE>
 where
     S: Schema,
     C: Clone,
-    FE: AsType<Node<S::Value>> + Send + Sync,
-    Node<S::Value>: FileLoad,
+    FE: AsType<Node<S::Value>> + Send + Sync + FileLoad,
 {
     /// Create a new [`Table`]
     pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
@@ -148,8 +147,7 @@ impl<S, C, FE> TableLock<S, S::Index, C, FE>
 where
     S: Schema,
     C: Clone,
-    FE: Send + Sync,
-    Node<S::Value>: FileLoad,
+    FE: Send + Sync + FileLoad,
 {
     /// Lock this [`Table`] for reading.
     pub async fn read(&self) -> TableReadGuard<S, S::Index, C, FE> {

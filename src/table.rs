@@ -61,9 +61,8 @@ impl<S, C, FE, G> Table<S, S::Index, C, G>
 where
     S: Schema,
     C: Collate<Value = S::Value> + 'static,
-    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + 'static,
-    Node<S::Value>: FileLoad,
     Range<S::Id, S::Value>: fmt::Debug,
 {
     /// Return `true` if the given `key` is present in this [`Table`].
@@ -118,9 +117,8 @@ impl<S, C, FE, G> Table<S, S::Index, C, G>
 where
     S: Schema,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
-    Node<S::Value>: FileLoad,
     Range<S::Id, S::Value>: fmt::Debug,
 {
     /// Count how many rows in this [`Table`] lie within the given `range`.
@@ -184,9 +182,8 @@ impl<S, C, FE> Table<S, S::Index, C, DirWriteGuardOwned<FE>>
 where
     S: Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     <S as Schema>::Index: Send + Sync,
-    Node<S::Value>: FileLoad,
 {
     /// Delete a row from this [`Table`] by its `key`.
     /// Returns `true` if the given `key` was present.
