@@ -50,9 +50,8 @@ impl<IS, C, FE, G> TableState<IS, C, G>
 where
     IS: IndexSchema,
     C: Collate<Value = IS::Value> + 'static,
-    FE: AsType<Node<IS::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<IS::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + 'static,
-    Node<IS::Value>: FileLoad,
     Range<IS::Id, IS::Value>: fmt::Debug,
 {
     pub(super) async fn contains(&self, prefix: &[IS::Value]) -> Result<bool, io::Error> {
@@ -132,9 +131,8 @@ impl<IS, C, FE, G> TableState<IS, C, G>
 where
     IS: IndexSchema,
     C: Collate<Value = IS::Value> + Clone + Send + Sync + 'static,
-    FE: AsType<Node<IS::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<IS::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
-    Node<IS::Value>: FileLoad,
     Range<IS::Id, IS::Value>: fmt::Debug,
 {
     pub(super) async fn count<'a>(
@@ -349,9 +347,8 @@ impl<IS, C, FE> TableState<IS, C, DirWriteGuardOwned<FE>>
 where
     IS: IndexSchema + Send + Sync,
     C: Collate<Value = IS::Value> + Clone + Send + Sync + 'static,
-    FE: AsType<Node<IS::Value>> + Send + Sync + 'static,
+    FE: AsType<Node<IS::Value>> + Send + Sync + 'static + FileLoad,
     DirWriteGuardOwned<FE>: DirDeref<Entry = FE>,
-    Node<IS::Value>: FileLoad,
 {
     pub(super) async fn delete_row(&mut self, key: &[IS::Value]) -> Result<bool, io::Error> {
         let row = if let Some(row) = self.get_row(key).await? {

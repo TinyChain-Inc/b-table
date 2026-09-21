@@ -32,6 +32,7 @@ safecast = "0.2"
 smallvec = "1.15"
 
 [dev-dependencies]
+tbon = { path = "../tbon", version = "0.9", features = ["tokio-io"] }
 destream = { path = "../destream", version = "0.10" }
 destream_json = { path = "../destream_json", version = "0.15", features = ["value"] }
 number-general = { path = "../number-general", version = "0.14" }
