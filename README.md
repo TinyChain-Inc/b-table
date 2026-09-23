@@ -53,6 +53,12 @@ expected_row.extend(value);
 
 ## Filesystem codecs
 
+Table delegates block mutation and synchronization to its native index storage.
+`sync()` is buffered; `sync_all()` is an explicit durability barrier, not atomic
+multi-index publication. The caller owns recovery from interrupted updates.
+`validate()` checks native trees and auxiliary consistency against primary rows.
+`copy_into()` copies native indexes into empty delegated storage.
+
 File entries implement `freqfs::FileLoad` and `FileSave`. Loads reconstruct the
 same entry type that saves write; typed access validates the resulting entry via
 `AsType`. Adapters must preserve payload identity across persistence rather than

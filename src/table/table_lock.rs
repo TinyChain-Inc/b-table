@@ -145,6 +145,118 @@ where
 
 impl<S, C, FE> TableLock<S, S::Index, C, FE>
 where
+    S: Schema + Send + Sync,
+    S::Index: Send + Sync,
+    C: b_tree::collate::Collate<Value = S::Value> + Clone + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + FileLoad,
+{
+    /// Validate native indexes and their consistency before accepting storage.
+    pub async fn validate(&self) -> Result<(), io::Error>
+    where
+        S::Value: Default,
+    {
+        self.primary.validate().await?;
+        for index in self.auxiliary.values() {
+            index.validate().await?;
+        }
+        self.validate_indexes().await
+    }
+
+    async fn validate_indexes(&self) -> Result<(), io::Error>
+    where
+        S::Value: Default,
+    {
+        use crate::IndexSchema;
+        use futures::TryStreamExt;
+
+        let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+        {
+            let dir = self.dir.read().await;
+            if dir.len() != self.auxiliary.len() + 1
+                || dir.iter().any(|(name, entry)| {
+                    !entry.is_dir()
+                        || (name != PRIMARY && !self.auxiliary.contains_key(name.as_str()))
+                })
+            {
+                return Err(invalid("invalid Table index directories"));
+            }
+        }
+        let mut rows = self
+            .primary
+            .read()
+            .await
+            .keys(b_tree::Range::<S::Value>::default())
+            .await?;
+        let mut count = 0;
+        while let Some(row) = rows.try_next().await? {
+            count += 1;
+            for index in self.auxiliary.values() {
+                let key = super::table_utils::extract_columns(
+                    row.clone(),
+                    self.primary.schema().columns(),
+                    index.schema().columns(),
+                );
+                if !index.read().await.contains(&key).await? {
+                    return Err(invalid("inconsistent Table index"));
+                }
+            }
+        }
+        for index in self.auxiliary.values() {
+            let actual = index
+                .read()
+                .await
+                .keys(b_tree::Range::<S::Value>::default())
+                .await?
+                .try_fold(0_u64, |count, _| futures::future::ready(Ok(count + 1)))
+                .await?;
+            if actual != count {
+                return Err(invalid("inconsistent Table index count"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy reachable index nodes into empty delegated storage.
+    pub async fn copy_into(&self, dir: DirLock<FE>) -> Result<Self, io::Error>
+    where
+        FE: Clone,
+    {
+        let (primary, targets) = {
+            let mut contents = dir.write().await;
+            if !contents.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "copy requires empty storage",
+                ));
+            }
+            let primary = contents.create_dir(PRIMARY.to_string())?;
+            let targets = self
+                .auxiliary
+                .keys()
+                .map(|name| {
+                    contents
+                        .create_dir(name.to_string())
+                        .map(|dir| (name.clone(), dir))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            (primary, targets)
+        };
+        let primary = self.primary.copy_into(primary).await?;
+        let mut auxiliary = BTreeMap::new();
+        for (name, target) in targets {
+            auxiliary.insert(name.clone(), self.auxiliary[&name].copy_into(target).await?);
+        }
+        Ok(Self {
+            schema: self.schema.clone(),
+            dir,
+            primary,
+            auxiliary,
+        })
+    }
+}
+
+impl<S, C, FE> TableLock<S, S::Index, C, FE>
+where
     S: Schema,
     C: Clone,
     FE: Send + Sync + FileLoad,
