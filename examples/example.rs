@@ -8,6 +8,8 @@ use b_table::{BTreeSchema, IndexSchema as IndexSchemaInstance, Node, Range, Tabl
 use destream::{de, en};
 use destream_json::Value;
 use freqfs::Cache;
+#[cfg(test)]
+use futures::FutureExt;
 use futures::TryStreamExt;
 use number_general::NumberCollator;
 use rand::RngExt;
@@ -37,6 +39,96 @@ async fn load_requires_all_indexes() -> Result<(), io::Error> {
     assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
     assert!(!root.read().await.contains("down"));
     Ok(())
+}
+
+#[test]
+fn in_place_indexes_reopen_and_reject_inconsistency() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (send, receive) = std::sync::mpsc::sync_channel(0);
+            runtime.spawn(async move {
+                let result = std::panic::AssertUnwindSafe(async {
+                    let schema = || {
+                        TableSchema::new(
+                            vec!["up", "up_name", "down", "down_name"],
+                            [("down".into(), vec!["down", "up"])],
+                        )
+                    };
+                    let path = setup_tmp_dir().await?;
+                    let cache = Cache::<File>::new(
+                        1024 * BLOCK_SIZE,
+                        None,
+                        0,
+                        std::time::Duration::from_secs(3),
+                    );
+                    let dir = cache.load(path.clone())?;
+                    let table = TableLock::create(schema(), Collator::new(), dir.clone())?;
+                    for key in 0..40 {
+                        table
+                            .write()
+                            .await
+                            .upsert(
+                                vec![key.into()],
+                                vec![
+                                    "up".to_string().into(),
+                                    key.into(),
+                                    "down".to_string().into(),
+                                ],
+                            )
+                            .boxed()
+                            .await?;
+                    }
+                    for key in 0..30 {
+                        table
+                            .write()
+                            .await
+                            .delete_row(&[key.into()])
+                            .boxed()
+                            .await?;
+                    }
+                    table.validate().await?;
+                    table.sync_all().await?;
+                    drop(table);
+                    let reopened = Cache::<File>::new(
+                        1024 * BLOCK_SIZE,
+                        None,
+                        0,
+                        std::time::Duration::from_secs(3),
+                    )
+                    .load(path.clone())?;
+                    let table = TableLock::load(schema(), Collator::new(), reopened.clone())?;
+                    table.validate().await?;
+                    assert_eq!(table.read().await.count(Range::default()).await?, 10);
+                    let auxiliary = reopened.read().await.get_dir("down").unwrap().clone();
+                    let name = auxiliary.read().await.iter().next().unwrap().0.clone();
+                    *auxiliary
+                        .write()
+                        .await
+                        .write_file::<_, Node<Value>>(&name)
+                        .await? = Node::Leaf(vec![]);
+                    assert!(table.validate().await.is_err());
+                    fs::remove_dir_all(path).await?;
+                    Ok::<_, io::Error>(())
+                })
+                .catch_unwind()
+                .await;
+                send.send(result).unwrap();
+            });
+            match receive.recv().unwrap() {
+                Ok(result) => result.unwrap(),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -205,9 +297,8 @@ impl b_table::Schema for TableSchema {
 }
 
 async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
-    let mut rng = rand::rng();
     loop {
-        let rand: u32 = rng.random();
+        let rand: u32 = rand::rng().random();
         let path = PathBuf::from(format!("/tmp/test_table_{}", rand));
         if !path.exists() {
             fs::create_dir(&path).await?;
