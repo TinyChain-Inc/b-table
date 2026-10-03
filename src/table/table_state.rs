@@ -12,12 +12,12 @@ use crate::plan::QueryPlan;
 use crate::schema::{IndexId, IndexSchema, Range};
 use crate::{ColumnRange, IndexStack, Node, Row, Rows};
 
-type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
-
 use super::table_utils::{
     borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
     inner_range_for, prefix_extractor,
 };
+
+type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
 
 pub(super) struct TableState<IS, C, G> {
     // IMPORTANT! the auxiliary field must go before primary so that it will be dropped first
@@ -46,6 +46,7 @@ impl<IS, C, G> TableState<IS, C, G> {
         }
     }
 }
+
 impl<IS, C, FE, G> TableState<IS, C, G>
 where
     IS: IndexSchema,
@@ -357,25 +358,49 @@ where
             return Ok(false);
         };
 
-        let mut deletes = IndexStack::with_capacity(self.auxiliary.len() + 1);
+        self.remove_row(&row, None).await?;
 
+        Ok(true)
+    }
+
+    // The old row was resolved by the caller. Keep unchanged auxiliary entries.
+    async fn remove_row(
+        &mut self,
+        row: &[IS::Value],
+        replacement: Option<&[IS::Value]>,
+    ) -> Result<(), io::Error> {
         for index in self.auxiliary.values_mut() {
-            let index_key = borrow_columns(
-                &row,
+            let key = borrow_columns(
+                row,
                 self.primary.schema().columns(),
                 index.schema().columns(),
             );
 
-            deletes.push(async move { index.delete(&index_key).await })
+            if replacement.is_some_and(|new| {
+                key == borrow_columns(
+                    new,
+                    self.primary.schema().columns(),
+                    index.schema().columns(),
+                )
+            }) {
+                continue;
+            }
+
+            if !index.delete(&key).await? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "table index is out of sync",
+                ));
+            }
         }
 
-        self.primary.delete(&row).await?;
-
-        for present in future::try_join_all(deletes).await? {
-            assert!(present, "table index is out of sync");
+        if !self.primary.delete(row).await? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing table primary row",
+            ));
         }
-
-        Ok(true)
+        Ok(())
     }
 
     pub(super) async fn delete_range<'a>(
@@ -436,28 +461,75 @@ where
         Ok(())
     }
 
-    pub(super) async fn upsert(&mut self, row: Vec<IS::Value>) -> Result<bool, io::Error> {
-        let mut inserts = IndexStack::with_capacity(self.auxiliary.len() + 1);
+    pub(super) async fn upsert(
+        &mut self,
+        row: Vec<IS::Value>,
+        key_len: usize,
+    ) -> Result<bool, io::Error> {
+        let previous = self.get_row(&row[..key_len]).await?;
+
+        if previous
+            .as_ref()
+            .is_some_and(|old| old.as_slice() == row.as_slice())
+        {
+            return Ok(false);
+        }
+
+        if let Some(old) = &previous {
+            self.remove_row(old, Some(&row)).await?;
+        }
 
         for index in self.auxiliary.values_mut() {
-            let index_key = clone_columns(
+            let key = clone_columns(
                 &row,
                 self.primary.schema().columns(),
                 index.schema().columns(),
             );
 
-            inserts.push(index.insert(index_key));
+            if previous.as_ref().is_some_and(|old| {
+                key.iter().eq(borrow_columns(
+                    old,
+                    self.primary.schema().columns(),
+                    index.schema().columns(),
+                ))
+            }) {
+                continue;
+            }
+
+            index.insert(key).await?;
         }
 
-        inserts.push(self.primary.insert(row));
+        self.primary.insert(row).await?;
 
-        let mut inserts = future::try_join_all(inserts).await?;
-        let new = inserts.pop().expect("insert");
-        while let Some(index_new) = inserts.pop() {
-            assert_eq!(new, index_new, "index out of sync");
-        }
+        Ok(previous.is_none())
+    }
 
-        Ok(new)
+    pub(super) async fn upsert_sorted<R>(&mut self, rows: R) -> Result<u64, io::Error>
+    where
+        R: futures::Stream<Item = Result<Vec<IS::Value>, io::Error>> + Send,
+        IS::Id: Sync,
+    {
+        let columns = self.primary.schema().columns().to_vec();
+        futures::pin_mut!(rows);
+
+        let rows =
+            futures::stream::try_unfold((rows, &mut self.auxiliary), |(mut rows, auxiliary)| {
+                let columns = &columns;
+                async move {
+                    let Some(row) = rows.try_next().await? else {
+                        return Ok(None);
+                    };
+
+                    for index in auxiliary.values_mut() {
+                        let key = clone_columns(&row, columns, index.schema().columns());
+                        index.insert(key).await?;
+                    }
+
+                    Ok(Some((row, (rows, auxiliary))))
+                }
+            });
+
+        self.primary.insert_sorted(rows).await
     }
 
     pub(super) async fn truncate(&mut self) -> Result<(), io::Error> {

@@ -54,8 +54,8 @@ where
     C: Clone,
     FE: AsType<Node<S::Value>> + Send + Sync + FileLoad,
 {
-    /// Create a new [`Table`]
-    pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
+    /// Create a new [`Table`], admitting each index root in order.
+    pub async fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         valid_schema(&schema)?;
 
         let mut dir_contents = dir.try_write()?;
@@ -69,14 +69,14 @@ where
 
         let primary = {
             let dir = dir_contents.create_dir(PRIMARY.to_string())?;
-            BTreeLock::create(schema.primary().clone(), collator.clone(), dir)
+            BTreeLock::create(schema.primary().clone(), collator.clone(), dir).await
         }?;
 
         let mut auxiliary = BTreeMap::new();
         for (name, schema) in schema.auxiliary() {
             let index = {
                 let dir = dir_contents.create_dir(name.to_string())?;
-                BTreeLock::create(schema.clone(), collator.clone(), dir)
+                BTreeLock::create(schema.clone(), collator.clone(), dir).await
             }?;
 
             auxiliary.insert(name.clone().into(), index);

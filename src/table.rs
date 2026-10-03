@@ -9,7 +9,7 @@ use std::{fmt, io};
 use b_tree::collate::Collate;
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
 use futures::future::TryFutureExt;
-use futures::stream::Stream;
+use futures::stream::{Stream, TryStreamExt};
 use safecast::AsType;
 use smallvec::SmallVec;
 
@@ -260,7 +260,8 @@ where
     }
 
     /// Insert or update a row in this [`Table`].
-    /// Returns `true` if a new row was inserted.
+    /// Returns `true` for a new primary key, `false` for replacement or an unchanged row.
+    /// Errors may retain partial native mutations; callers own recovery.
     pub async fn upsert(
         &mut self,
         key: Vec<S::Value>,
@@ -273,7 +274,37 @@ where
         row.extend(key);
         row.extend(values);
 
-        self.state.upsert(row).map_err(S::Error::from).await
+        self.state
+            .upsert(row, self.schema.key().len())
+            .map_err(S::Error::from)
+            .await
+    }
+
+    /// Append key/value pairs in primary-index order, at or beyond its maximum.
+    /// This ordered insertion path does not replace existing primary-key values.
+    /// Returns the number of new rows. Like `upsert`, an error may retain a
+    /// partially inserted prefix; callers own unpublished construction/recovery.
+    pub async fn upsert_sorted<R>(&mut self, rows: R) -> Result<u64, io::Error>
+    where
+        R: Stream<Item = Result<(Vec<S::Value>, Vec<S::Value>), io::Error>> + Send,
+        S::Id: Sync,
+    {
+        let schema = &self.schema;
+        let rows = rows
+            .map_ok(|(key, values)| {
+                let mut key = schema
+                    .validate_key(key)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+                key.extend(
+                    schema
+                        .validate_values(values)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
+                );
+                Ok(key)
+            })
+            .and_then(futures::future::ready);
+
+        self.state.upsert_sorted(rows).await
     }
 
     /// Delete all rows from this [`Table`].
