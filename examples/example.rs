@@ -6,17 +6,111 @@ use std::path::PathBuf;
 use b_table::collate::{self, Collate};
 use b_table::{BTreeSchema, IndexSchema as IndexSchemaInstance, Node, Range, TableLock};
 use destream::{de, en};
-use destream_json::Value;
 use freqfs::Cache;
 #[cfg(test)]
 use futures::FutureExt;
 use futures::TryStreamExt;
+use get_size::GetSize;
 use number_general::NumberCollator;
 use rand::RngExt;
 use safecast::as_type;
 use tokio::fs;
 
+#[tokio::test]
+async fn variable_width_separators_rebalance_and_reopen() -> Result<(), io::Error> {
+    let path = setup_tmp_dir().await?;
+    let key = |index: usize| {
+        Value::String(format!(
+            "{index:04}-{}",
+            "x".repeat(if index % 2 == 0 { 8 } else { 512 })
+        ))
+    };
+    let cache = Cache::<File>::new(4 * 1024 * 1024, None, 0, std::time::Duration::from_secs(3));
+    let tree = b_tree::BTreeLock::create(
+        IndexSchema::new(["key"]),
+        Collator::new(),
+        cache.load(path.clone())?,
+    )
+    .await?;
+    {
+        let mut tree = tree.write().await;
+        for index in 0..128 {
+            assert!(tree.insert(vec![key(index)]).await?);
+        }
+        // Short lower bounds are replaced by long keys without changing index width.
+        for index in (0..128).step_by(2) {
+            assert!(tree.delete(&[key(index)]).await?);
+        }
+        // Deleting from both ends exercises sibling borrowing and node retirement.
+        for index in (1..64).step_by(2).rev() {
+            assert!(tree.delete(&[key(index)]).await?);
+        }
+    }
+    tree.validate().await?;
+    tree.sync_all().await?;
+    drop(tree);
+    let cache = Cache::<File>::new(4 * 1024 * 1024, None, 0, std::time::Duration::from_secs(3));
+    let tree = b_tree::BTreeLock::load(
+        IndexSchema::new(["key"]),
+        Collator::new(),
+        cache.load(path.clone())?,
+    )?;
+    tree.validate().await?;
+    let actual: Vec<_> = tree
+        .read()
+        .await
+        .keys(b_tree::Range::<Value>::default())
+        .await?
+        .map_ok(|row| row[0].clone())
+        .try_collect()
+        .await?;
+    assert_eq!(actual, (65..128).step_by(2).map(key).collect::<Vec<_>>());
+    drop(tree);
+    fs::remove_dir_all(path).await
+}
+
 const BLOCK_SIZE: usize = 4_096;
+
+#[tokio::test]
+async fn cancelled_index_construction_is_not_loadable() -> io::Result<()> {
+    let schema = || {
+        TableSchema::new(
+            vec!["up", "up_name", "down", "down_name"],
+            [("down".into(), vec!["down", "up"])],
+        )
+    };
+    let path = setup_tmp_dir().await?;
+    let empty_size = File::Node(Node::Leaf(vec![])).get_size();
+    let cache = Cache::<File>::new(
+        2 * empty_size,
+        Some(1),
+        0,
+        std::time::Duration::from_secs(1),
+    );
+    let root = cache.load(path.clone())?;
+    let filler = root
+        .write()
+        .await
+        .create_empty_file("pinned".into(), File::Node(Node::Leaf(vec![])))
+        .await?;
+    let pinned = filler.read::<Node<Value>>().await?;
+    let dir = root.write().await.create_dir("table".into())?;
+    {
+        let construction = TableLock::create(schema(), Collator::new(), dir.clone());
+        futures::pin_mut!(construction);
+        assert!(futures::poll!(&mut construction).is_pending());
+    }
+    // The primary root was admitted, but eviction cannot acquire a handle
+    // while the filler is pinned. Cancelling leaves the later index incomplete.
+    let primary = dir.read().await.get_dir("primary").unwrap().clone();
+    assert!(!primary.read().await.is_empty());
+    let auxiliary = dir.read().await.get_dir("down").unwrap().clone();
+    assert!(auxiliary.read().await.is_empty());
+    assert!(TableLock::load(schema(), Collator::new(), dir).is_err());
+    drop(pinned);
+    root.write().await.truncate_and_sync().await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn load_requires_all_indexes() -> Result<(), io::Error> {
@@ -31,7 +125,7 @@ async fn load_requires_all_indexes() -> Result<(), io::Error> {
     let root = cache.load(path)?;
     assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
     assert!(root.read().await.is_empty());
-    let table = TableLock::create(schema(), Collator::new(), root.clone())?;
+    let table = TableLock::create(schema(), Collator::new(), root.clone()).await?;
     table.sync().await?;
     assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_ok());
     drop(table);
@@ -58,7 +152,10 @@ fn in_place_indexes_reopen_and_reject_inconsistency() {
                     let schema = || {
                         TableSchema::new(
                             vec!["up", "up_name", "down", "down_name"],
-                            [("down".into(), vec!["down", "up"])],
+                            [
+                                ("down".into(), vec!["down", "up"]),
+                                ("name".into(), vec!["up_name", "up"]),
+                            ],
                         )
                     };
                     let path = setup_tmp_dir().await?;
@@ -69,22 +166,73 @@ fn in_place_indexes_reopen_and_reject_inconsistency() {
                         std::time::Duration::from_secs(3),
                     );
                     let dir = cache.load(path.clone())?;
-                    let table = TableLock::create(schema(), Collator::new(), dir.clone())?;
+                    let table = TableLock::create(schema(), Collator::new(), dir.clone()).await?;
+                    let rows = futures::stream::iter((0..40).flat_map(|key| {
+                        let row = (
+                            vec![key.into()],
+                            vec![
+                                "up".to_string().into(),
+                                key.into(),
+                                "down".to_string().into(),
+                            ],
+                        );
+                        [Ok(row.clone()), Ok(row)]
+                    }));
+                    assert_eq!(table.write().await.upsert_sorted(rows).await?, 40);
+                    let rows = futures::stream::iter([
+                        Ok((
+                            vec![40.into()],
+                            vec![
+                                "up".to_string().into(),
+                                40.into(),
+                                "down".to_string().into(),
+                            ],
+                        )),
+                        Err(io::Error::other("injected source error")),
+                    ]);
+                    assert!(table.write().await.upsert_sorted(rows).await.is_err());
+                    assert!(table.read().await.get_row(&[40.into()]).await?.is_some());
+
+                    // Replacement preserves one row per primary key and removes stale indexes.
                     for key in 0..40 {
-                        table
-                            .write()
-                            .await
-                            .upsert(
-                                vec![key.into()],
-                                vec![
-                                    "up".to_string().into(),
-                                    key.into(),
-                                    "down".to_string().into(),
-                                ],
-                            )
-                            .boxed()
-                            .await?;
+                        let mut values = vec![
+                            "changed".to_string().into(),
+                            (key + 100).into(),
+                            "down".to_string().into(),
+                        ];
+                        let mut guard = table.write().await;
+                        assert!(
+                            !guard
+                                .upsert(vec![key.into()], values.clone())
+                                .boxed()
+                                .await?
+                        );
+                        assert!(
+                            !guard
+                                .upsert(vec![key.into()], values.clone())
+                                .boxed()
+                                .await?
+                        );
+                        values[2] = "annotation only".to_string().into();
+                        assert!(
+                            !guard
+                                .upsert(vec![key.into()], values.clone())
+                                .boxed()
+                                .await?
+                        );
+                        assert_eq!(
+                            guard.get_row(&[key.into()]).await?.unwrap().as_slice(),
+                            &[
+                                key.into(),
+                                values[0].clone(),
+                                values[1].clone(),
+                                values[2].clone()
+                            ]
+                        );
+                        assert!(guard.upsert(vec![], values).boxed().await.is_err());
                     }
+                    table.validate().await?;
+                    assert_eq!(table.read().await.count(Range::default()).await?, 41);
                     for key in 0..30 {
                         table
                             .write()
@@ -105,15 +253,37 @@ fn in_place_indexes_reopen_and_reject_inconsistency() {
                     .load(path.clone())?;
                     let table = TableLock::load(schema(), Collator::new(), reopened.clone())?;
                     table.validate().await?;
-                    assert_eq!(table.read().await.count(Range::default()).await?, 10);
+                    assert_eq!(table.read().await.count(Range::default()).await?, 11);
                     let auxiliary = reopened.read().await.get_dir("down").unwrap().clone();
                     let name = auxiliary.read().await.iter().next().unwrap().0.clone();
                     *auxiliary
                         .write()
                         .await
-                        .write_file::<_, Node<Value>>(&name)
+                        .write_file::<_, Node<Value>>(&name, 0)
                         .await? = Node::Leaf(vec![]);
                     assert!(table.validate().await.is_err());
+                    *auxiliary
+                        .write()
+                        .await
+                        .write_file::<_, Node<Value>>("00000000-0000-0000-0000-000000000000", 0)
+                        .await? = Node::Leaf(vec![]);
+                    // Native mutation fails structurally on a missing old auxiliary entry.
+                    assert!(
+                        table
+                            .write()
+                            .await
+                            .upsert(
+                                vec![39.into()],
+                                vec![
+                                    "again".to_string().into(),
+                                    999.into(),
+                                    "down".to_string().into()
+                                ]
+                            )
+                            .boxed()
+                            .await
+                            .is_err()
+                    );
                     fs::remove_dir_all(path).await?;
                     Ok::<_, io::Error>(())
                 })
@@ -158,6 +328,82 @@ impl Collate for Collator {
     }
 }
 
+// This example stores only scalar numbers and strings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Value {
+    Number(number_general::Number),
+    String(String),
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Number(0.into())
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Self::Number(value.into())
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl GetSize for Value {
+    fn get_heap_size(&self) -> usize {
+        match self {
+            Self::Number(_) => 0,
+            Self::String(value) => value.capacity(),
+        }
+    }
+}
+
+impl de::FromStream for Value {
+    type Context = ();
+
+    async fn from_stream<D: de::Decoder>(_: (), decoder: &mut D) -> Result<Self, D::Error> {
+        struct Scalar;
+
+        impl de::Visitor for Scalar {
+            type Value = Value;
+
+            fn expecting() -> &'static str {
+                "a number or string"
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
+                Ok(Value::String(value))
+            }
+        }
+        decoder.decode_any(Scalar).await
+    }
+}
+
+impl<'en> en::ToStream<'en> for Value {
+    fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
+        match self {
+            Self::Number(value) => value.to_stream(encoder),
+            Self::String(value) => value.to_stream(encoder),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum File {
     Node(Node<Value>),
@@ -165,6 +411,7 @@ enum File {
 
 impl de::FromStream for File {
     type Context = ();
+
     async fn from_stream<D: de::Decoder>(cxt: (), decoder: &mut D) -> Result<Self, D::Error> {
         Node::from_stream(cxt, decoder).await.map(Self::Node)
     }
@@ -342,7 +589,7 @@ async fn main() -> Result<(), io::Error> {
     ];
 
     // create the table
-    let table = TableLock::create(schema, Collator::new(), dir)?;
+    let table = TableLock::create(schema, Collator::new(), dir).await?;
 
     // test reading from an empty table
     {
@@ -497,7 +744,32 @@ async fn main() -> Result<(), io::Error> {
     fs::remove_dir_all(path).await
 }
 
+impl get_size::GetSize for File {
+    fn get_heap_size(&self) -> usize {
+        match self {
+            Self::Node(node) => node.get_heap_size(),
+        }
+    }
+}
+
 impl freqfs::FileLoad for File {
+    async fn load_size(
+        _: &std::path::Path,
+        _: &mut tokio::fs::File,
+        metadata: &std::fs::Metadata,
+    ) -> io::Result<usize> {
+        // TBON sequences have no allocation-sized length header. Every retained
+        // row/cell needs encoded input; cover geometric Vec growth and scalar
+        // payload bytes before decoding without retaining any parsed payload.
+        let encoded = usize::try_from(metadata.len()).map_err(io::Error::other)?;
+        let per_byte =
+            2 * std::mem::size_of::<Vec<Value>>() + 8 * std::mem::size_of::<Value>() + 32;
+        encoded
+            .checked_mul(per_byte)
+            .and_then(|size| size.checked_add(std::mem::size_of::<Self>()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "node too large"))
+    }
+
     async fn load(
         _: &std::path::Path,
         file: tokio::fs::File,
@@ -508,16 +780,20 @@ impl freqfs::FileLoad for File {
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 }
+
 impl freqfs::FileSave for File {
     async fn save(&self, file: &mut tokio::fs::File) -> std::io::Result<u64> {
         use futures::TryStreamExt;
         use tokio::io::AsyncWriteExt;
+
         let mut stream = tbon::en::encode(self).map_err(std::io::Error::other)?;
         let mut size = 0;
+
         while let Some(chunk) = stream.try_next().await.map_err(std::io::Error::other)? {
             file.write_all(&chunk).await?;
             size += chunk.len() as u64;
         }
+
         Ok(size)
     }
 }

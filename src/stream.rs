@@ -73,7 +73,9 @@ where
         decoder: &mut D,
     ) -> Result<Self, D::Error> {
         let (schema, collator, dir) = context;
-        let table = TableLock::create(schema, collator, dir).map_err(de::Error::custom)?;
+        let table = TableLock::create(schema, collator, dir)
+            .await
+            .map_err(de::Error::custom)?;
         decoder.decode_seq(TableVisitor { table }).await
     }
 }
