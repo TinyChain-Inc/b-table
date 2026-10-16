@@ -799,6 +799,7 @@ async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
             fs::remove_dir_all(path).await?;
         }
     }
+
     Ok(())
 }
 
@@ -1472,6 +1473,7 @@ fn benchmark_index_mutations() -> io::Result<()> {
                 drop(table);
                 fs::remove_dir_all(path).await?;
             }
+
             Ok(())
         })
 }

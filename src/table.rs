@@ -1,7 +1,3 @@
-mod table_lock;
-mod table_state;
-mod table_utils;
-
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -13,11 +9,14 @@ use futures::stream::{Stream, StreamExt};
 use safecast::AsType;
 use smallvec::SmallVec;
 
+use self::table_state::TableState;
+use self::table_utils::bad_key;
 use super::Node;
 use super::schema::{IndexSchema, Range, Schema, TableSchema};
 
-use table_state::TableState;
-use table_utils::bad_key;
+mod table_lock;
+mod table_state;
+mod table_utils;
 
 pub use table_lock::TableLock;
 
@@ -271,6 +270,7 @@ where
     ) -> Result<bool, S::Error> {
         let mut row = self.schema.validate_key(key)?;
         let values = self.schema.validate_values(values)?;
+
         row.reserve_exact(values.len());
         row.extend(values);
 

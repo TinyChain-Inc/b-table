@@ -3,7 +3,9 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::hash::Hash;
 
-use super::schema::*;
+use super::schema::{
+    BTreeSchema, ColumnRange, IndexId, IndexSchema, Schema, TableSchema, range_is_supported,
+};
 use super::{Columns, INDEX_STACK_SIZE, IndexStack, ROW_STACK_SIZE};
 
 #[derive(Clone, Eq, PartialEq)]

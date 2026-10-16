@@ -4,10 +4,10 @@ use std::hash::Hash;
 use std::ops::{Bound, Deref};
 use std::{fmt, io, iter};
 
-use b_tree::collate::*;
+pub use b_tree::Schema as BTreeSchema;
+use b_tree::collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
 
 use crate::plan::QueryPlan;
-pub use b_tree::Schema as BTreeSchema;
 
 /// An ID type used to look up a specific table index
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Default)]
@@ -506,6 +506,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use b_tree::collate::Collator;
+
     use super::*;
 
     fn range(lower: Bound<u64>, upper: Bound<u64>) -> Range<&'static str, u64> {

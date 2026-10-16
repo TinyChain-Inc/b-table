@@ -8,14 +8,13 @@ use futures::future::{self, TryFutureExt};
 use futures::stream::TryStreamExt;
 use safecast::AsType;
 
-use crate::plan::QueryPlan;
-use crate::schema::{IndexId, IndexSchema, Range};
-use crate::{ColumnRange, IndexStack, Node, Row, Rows};
-
 use super::table_utils::{
     borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
     inner_range_for, prefix_extractor,
 };
+use crate::plan::QueryPlan;
+use crate::schema::{IndexId, IndexSchema, Range};
+use crate::{ColumnRange, IndexStack, Node, Row, Rows};
 
 type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
 
@@ -368,12 +367,14 @@ where
         let columns = self.primary.schema().columns();
         let deletes = self.auxiliary.values_mut().map(|index| async move {
             let key = borrow_columns(row, columns, index.schema().columns());
+
             if !index.delete(&key).await? {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "table index is out of sync",
                 ));
             }
+
             Ok(())
         });
         future::try_join_all(deletes).await?;
@@ -384,6 +385,7 @@ where
                 "missing table primary row",
             ));
         }
+
         Ok(())
     }
 
@@ -460,8 +462,10 @@ where
         let columns = self.primary.schema().columns();
         let updates = self.auxiliary.values_mut().map(|index| {
             let row = &row;
+
             async move {
                 let key = borrow_columns(row, columns, index.schema().columns());
+
                 if let Some(old) = previous {
                     let old_key = borrow_columns(old, columns, index.schema().columns());
                     if key == old_key {
@@ -507,6 +511,7 @@ where
         let rows =
             futures::stream::try_unfold((rows, &mut self.auxiliary), |(mut rows, auxiliary)| {
                 let columns = &columns;
+
                 async move {
                     let Some(row) = rows.try_next().await? else {
                         return Ok(None);

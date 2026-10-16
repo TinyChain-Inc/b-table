@@ -6,12 +6,11 @@ use b_tree::BTreeLock;
 use freqfs::{DirLock, FileLoad, FileSave};
 use safecast::AsType;
 
-use crate::Node;
-use crate::schema::{Schema, TableSchema};
-
 use super::table_state::TableState;
 use super::table_utils::valid_schema;
 use super::{PRIMARY, Table, TableReadGuard, TableWriteGuard};
+use crate::Node;
+use crate::schema::{Schema, TableSchema};
 
 /// A futures-aware read-write lock on a [`Table`]
 pub struct TableLock<S, IS, C, FE> {
@@ -213,6 +212,7 @@ where
                 return Err(invalid("inconsistent Table index count"));
             }
         }
+
         Ok(())
     }
 
@@ -246,6 +246,7 @@ where
         for (name, target) in targets {
             auxiliary.insert(name.clone(), self.auxiliary[&name].copy_into(target).await?);
         }
+
         Ok(Self {
             schema: self.schema.clone(),
             dir,
