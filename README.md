@@ -79,5 +79,22 @@ native writes; callers own unpublished construction and recovery.
 `Table::upsert` replaces an existing primary-key row and updates changed auxiliary
 entries. It returns `true` for insertion and `false` for replacement or an
 unchanged row. `upsert_sorted` remains ordered insertion for construction; it does
-not replace existing primary-key values. Native mutation errors may leave partial
-changes, and the caller owns recovery.
+not replace existing primary-key values. Primary replacement preserves row order
+and topology through native B-tree replacement. Rows sharing a primary prefix
+can therefore cause ordering or collator-ambiguity errors. Auxiliary differences
+are applied first; even a primary replacement rejection can leave partial index
+changes. The caller owns recovery.
+
+`Table::try_update` resolves a primary-key row once and lends it to a synchronous,
+fallible callback. The callback returns replacement value columns, or `None` to
+delete; the key remains fixed. Table validates the result and owns index maintenance.
+Callback and validation errors are nonmutating; publication retains the partial-mutation
+contract above. The callback must not reacquire the table's write owner.
+
+Row mutations overlap independent auxiliary-index operations within the acquired
+Table write owner. Each index deletes its old entry before inserting the new one;
+primary publication waits for all auxiliary operations. Ordered ingestion retains
+row order while overlapping auxiliary work within each row. Errors cancel unfinished
+siblings and may leave partial auxiliary changes; error/index completion order is
+not guaranteed. Index-lock acquisition remains ordered. Concurrent operations may
+retain more cache capacity, with admission delegated to freqfs.

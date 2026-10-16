@@ -9,7 +9,7 @@ use std::{fmt, io};
 use b_tree::collate::Collate;
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
 use futures::future::TryFutureExt;
-use futures::stream::{Stream, TryStreamExt};
+use futures::stream::{Stream, StreamExt};
 use safecast::AsType;
 use smallvec::SmallVec;
 
@@ -157,8 +157,7 @@ where
 
     /// Consume this [`TableReadGuard`] to construct a [`Stream`] of all the rows in the [`Table`].
     pub async fn into_rows(self) -> Result<Rows<S::Value>, io::Error> {
-        let rows = self.rows(Range::default(), &[], false, None).await?;
-        Ok(Box::pin(rows))
+        self.rows(Range::default(), &[], false, None).await
     }
 }
 
@@ -261,23 +260,60 @@ where
 
     /// Insert or update a row in this [`Table`].
     /// Returns `true` for a new primary key, `false` for replacement or an unchanged row.
-    /// Errors may retain partial native mutations; callers own recovery.
+    /// Replacement preserves primary-index order. Multiple rows sharing a primary
+    /// prefix (for example from ordered ingestion) can cause ordering or ambiguity
+    /// errors. Auxiliary changes precede primary replacement: even these errors
+    /// may retain partial native mutations, and callers own recovery.
     pub async fn upsert(
         &mut self,
         key: Vec<S::Value>,
         values: Vec<S::Value>,
     ) -> Result<bool, S::Error> {
-        let key = self.schema.validate_key(key)?;
+        let mut row = self.schema.validate_key(key)?;
         let values = self.schema.validate_values(values)?;
-
-        let mut row = Vec::with_capacity(key.len() + values.len());
-        row.extend(key);
+        row.reserve_exact(values.len());
         row.extend(values);
 
+        let previous = self.state.get_row(&row[..self.schema.key().len()]).await?;
         self.state
-            .upsert(row, self.schema.key().len())
+            .upsert(row, previous.as_deref())
             .map_err(S::Error::from)
             .await
+    }
+
+    /// Resolve a row once and synchronously compute its replacement value columns.
+    /// The callback borrows the complete previous row, or `None` when absent.
+    /// Returning `None` deletes an existing row; an absent row remains absent.
+    /// The primary key is fixed. The callback runs under this table's write owner
+    /// and must not reacquire it. Callback and value-validation errors are nonmutating.
+    /// Index publication retains [`Self::upsert`]'s partial-mutation contract.
+    pub async fn try_update<E>(
+        &mut self,
+        key: Vec<S::Value>,
+        update: impl FnOnce(Option<&[S::Value]>) -> Result<Option<Vec<S::Value>>, E>,
+    ) -> Result<(), E>
+    where
+        E: From<S::Error>,
+    {
+        let mut key = self.schema.validate_key(key).map_err(E::from)?;
+        let previous = self.state.get_row(&key).await.map_err(S::Error::from)?;
+
+        if let Some(values) = update(previous.as_deref())? {
+            let values = self.schema.validate_values(values).map_err(E::from)?;
+            key.reserve_exact(values.len());
+            key.extend(values);
+            self.state
+                .upsert(key, previous.as_deref())
+                .await
+                .map_err(S::Error::from)?;
+        } else if let Some(previous) = previous {
+            self.state
+                .remove_row(&previous)
+                .await
+                .map_err(S::Error::from)?;
+        }
+
+        Ok(())
     }
 
     /// Append key/value pairs in primary-index order, at or beyond its maximum.
@@ -290,19 +326,18 @@ where
         S::Id: Sync,
     {
         let schema = &self.schema;
-        let rows = rows
-            .map_ok(|(key, values)| {
-                let mut key = schema
-                    .validate_key(key)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-                key.extend(
-                    schema
-                        .validate_values(values)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
-                );
-                Ok(key)
-            })
-            .and_then(futures::future::ready);
+        let rows = rows.map(|row| {
+            let (key, values) = row?;
+            let mut key = schema
+                .validate_key(key)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+            key.extend(
+                schema
+                    .validate_values(values)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
+            );
+            Ok(key)
+        });
 
         self.state.upsert_sorted(rows).await
     }
