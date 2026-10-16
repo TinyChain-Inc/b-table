@@ -296,13 +296,13 @@ fn in_place_indexes_reopen_and_reject_inconsistency() {
                     *auxiliary
                         .write()
                         .await
-                        .write_file::<_, Node<Value>>(&name, 0)
+                        .write_file::<_, Node<Value>>(&name)
                         .await? = Node::Leaf(vec![]);
                     assert!(table.validate().await.is_err());
                     *auxiliary
                         .write()
                         .await
-                        .write_file::<_, Node<Value>>("00000000-0000-0000-0000-000000000000", 0)
+                        .write_file::<_, Node<Value>>("00000000-0000-0000-0000-000000000000")
                         .await? = Node::Leaf(vec![]);
                     // Native mutation fails structurally on a missing old auxiliary entry.
                     assert!(
@@ -838,7 +838,7 @@ async fn auxiliary_error_releases_pending_sibling_before_primary() -> io::Result
     let left = left.read().await.get_file(ROOT).unwrap().clone();
     let right = right.read().await.get_file(ROOT).unwrap().clone();
     let blocked = left.read::<Node<Value>>().await?;
-    let mut broken = right.write::<Node<Value>>(0).await?;
+    let mut broken = right.write::<Node<Value>>().await?;
     *broken = Node::Leaf(Vec::new());
     let mut owner = table.write().await;
     let key = [1.into()];
