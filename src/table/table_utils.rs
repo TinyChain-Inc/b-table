@@ -10,6 +10,30 @@ use crate::plan::IndexQuery;
 use crate::schema::{ColumnRange, IndexSchema, Schema};
 
 #[inline]
+fn selected_columns<'a, 'b, K, V>(
+    row: &'a [V],
+    columns_in: &'b [K],
+    columns_out: &'b [K],
+) -> impl Iterator<Item = &'a V> + 'b
+where
+    'a: 'b,
+    K: Eq,
+{
+    assert_eq!(row.len(), columns_in.len());
+
+    debug_assert!(
+        columns_out
+            .iter()
+            .all(|col_name| columns_in.contains(col_name))
+    );
+
+    columns_out
+        .iter()
+        .filter_map(move |col_name| columns_in.iter().position(|c| c == col_name))
+        .map(move |i| &row[i])
+}
+
+#[inline]
 pub(super) fn borrow_columns<'a, K, V>(
     row: &'a [V],
     columns_in: &[K],
@@ -18,19 +42,7 @@ pub(super) fn borrow_columns<'a, K, V>(
 where
     K: Eq,
 {
-    assert_eq!(row.len(), columns_in.len());
-
-    debug_assert!(
-        columns_out
-            .iter()
-            .all(|col_name| columns_in.contains(col_name))
-    );
-
-    columns_out
-        .iter()
-        .filter_map(|col_name| columns_in.iter().position(|c| c == col_name))
-        .map(|i| &row[i])
-        .collect()
+    selected_columns(row, columns_in, columns_out).collect()
 }
 
 #[inline]
@@ -39,18 +51,8 @@ where
     K: Eq,
     V: Clone,
 {
-    assert_eq!(row.len(), columns_in.len());
-
-    debug_assert!(
-        columns_out
-            .iter()
-            .all(|col_name| columns_in.contains(col_name))
-    );
-
-    columns_out
-        .iter()
-        .filter_map(|col_name| columns_in.iter().position(|c| c == col_name))
-        .map(|i| row[i].clone())
+    selected_columns(row, columns_in, columns_out)
+        .cloned()
         .collect()
 }
 

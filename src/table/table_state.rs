@@ -8,14 +8,13 @@ use futures::future::{self, TryFutureExt};
 use futures::stream::TryStreamExt;
 use safecast::AsType;
 
-use crate::plan::QueryPlan;
-use crate::schema::{IndexId, IndexSchema, Range};
-use crate::{ColumnRange, IndexStack, Node, Row, Rows};
-
 use super::table_utils::{
     borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
     inner_range_for, prefix_extractor,
 };
+use crate::plan::QueryPlan;
+use crate::schema::{IndexId, IndexSchema, Range};
+use crate::{ColumnRange, IndexStack, Node, Row, Rows};
 
 type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
 
@@ -358,33 +357,16 @@ where
             return Ok(false);
         };
 
-        self.remove_row(&row, None).await?;
+        self.remove_row(&row).await?;
 
         Ok(true)
     }
 
-    // The old row was resolved by the caller. Keep unchanged auxiliary entries.
-    async fn remove_row(
-        &mut self,
-        row: &[IS::Value],
-        replacement: Option<&[IS::Value]>,
-    ) -> Result<(), io::Error> {
-        for index in self.auxiliary.values_mut() {
-            let key = borrow_columns(
-                row,
-                self.primary.schema().columns(),
-                index.schema().columns(),
-            );
-
-            if replacement.is_some_and(|new| {
-                key == borrow_columns(
-                    new,
-                    self.primary.schema().columns(),
-                    index.schema().columns(),
-                )
-            }) {
-                continue;
-            }
+    // The caller has already resolved the complete primary row.
+    pub(super) async fn remove_row(&mut self, row: &[IS::Value]) -> Result<(), io::Error> {
+        let columns = self.primary.schema().columns();
+        let deletes = self.auxiliary.values_mut().map(|index| async move {
+            let key = borrow_columns(row, columns, index.schema().columns());
 
             if !index.delete(&key).await? {
                 return Err(io::Error::new(
@@ -392,7 +374,10 @@ where
                     "table index is out of sync",
                 ));
             }
-        }
+
+            Ok(())
+        });
+        future::try_join_all(deletes).await?;
 
         if !self.primary.delete(row).await? {
             return Err(io::Error::new(
@@ -400,6 +385,7 @@ where
                 "missing table primary row",
             ));
         }
+
         Ok(())
     }
 
@@ -411,8 +397,11 @@ where
     ) -> Result<usize, io::Error> {
         let mut deleted = 0;
 
-        while let Some(pk) = self.first(&plan, &range, key_columns, key_columns).await? {
-            self.delete_row(&pk).await?;
+        while let Some(row) = self
+            .first(&plan, &range, self.primary.schema().columns(), key_columns)
+            .await?
+        {
+            self.remove_row(&row).await?;
             deleted += 1;
         }
 
@@ -464,42 +453,49 @@ where
     pub(super) async fn upsert(
         &mut self,
         row: Vec<IS::Value>,
-        key_len: usize,
+        previous: Option<&[IS::Value]>,
     ) -> Result<bool, io::Error> {
-        let previous = self.get_row(&row[..key_len]).await?;
-
-        if previous
-            .as_ref()
-            .is_some_and(|old| old.as_slice() == row.as_slice())
-        {
+        if previous.is_some_and(|old| old == row.as_slice()) {
             return Ok(false);
         }
 
-        if let Some(old) = &previous {
-            self.remove_row(old, Some(&row)).await?;
-        }
+        let columns = self.primary.schema().columns();
+        let updates = self.auxiliary.values_mut().map(|index| {
+            let row = &row;
 
-        for index in self.auxiliary.values_mut() {
-            let key = clone_columns(
-                &row,
-                self.primary.schema().columns(),
-                index.schema().columns(),
-            );
+            async move {
+                let key = borrow_columns(row, columns, index.schema().columns());
 
-            if previous.as_ref().is_some_and(|old| {
-                key.iter().eq(borrow_columns(
-                    old,
-                    self.primary.schema().columns(),
-                    index.schema().columns(),
-                ))
-            }) {
-                continue;
+                if let Some(old) = previous {
+                    let old_key = borrow_columns(old, columns, index.schema().columns());
+                    if key == old_key {
+                        return Ok(());
+                    }
+
+                    if !index.delete(&old_key).await? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "table index is out of sync",
+                        ));
+                    }
+                }
+
+                index.insert(key.into_iter().cloned().collect()).await?;
+                Ok(())
             }
+        });
+        future::try_join_all(updates).await?;
 
-            index.insert(key).await?;
+        if let Some(old) = previous {
+            if !self.primary.replace(old, row).await? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing table primary row",
+                ));
+            }
+        } else {
+            self.primary.insert(row).await?;
         }
-
-        self.primary.insert(row).await?;
 
         Ok(previous.is_none())
     }
@@ -515,15 +511,17 @@ where
         let rows =
             futures::stream::try_unfold((rows, &mut self.auxiliary), |(mut rows, auxiliary)| {
                 let columns = &columns;
+
                 async move {
                     let Some(row) = rows.try_next().await? else {
                         return Ok(None);
                     };
 
-                    for index in auxiliary.values_mut() {
+                    let inserts = auxiliary.values_mut().map(|index| {
                         let key = clone_columns(&row, columns, index.schema().columns());
-                        index.insert(key).await?;
-                    }
+                        index.insert(key)
+                    });
+                    future::try_join_all(inserts).await?;
 
                     Ok(Some((row, (rows, auxiliary))))
                 }

@@ -7,7 +7,7 @@ use freqfs::{DirLock, FileLoad};
 use futures::TryFutureExt;
 use safecast::AsType;
 
-use super::{Node, Range, Schema, TableLock};
+use super::{IndexSchema, Node, Range, Schema, TableLock};
 
 struct TableVisitor<S, IS, C, FE> {
     table: TableLock<S, IS, C, FE>,
@@ -16,7 +16,7 @@ struct TableVisitor<S, IS, C, FE> {
 impl<S, IS, C, FE> de::Visitor for TableVisitor<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
-    IS: b_tree::Schema + Send + Sync,
+    IS: IndexSchema<Id = S::Id> + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     IS::Value: de::FromStream<Context = ()>,
@@ -57,7 +57,7 @@ where
 impl<S, IS, C, FE> de::FromStream for TableLock<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
-    IS: b_tree::Schema + Send + Sync,
+    IS: IndexSchema<Id = S::Id> + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     IS::Value: de::FromStream<Context = ()>,
