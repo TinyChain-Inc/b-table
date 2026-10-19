@@ -51,7 +51,7 @@ pub trait IndexSchema: BTreeSchema + Clone + Send + Sync + 'static {
     }
 }
 
-/// The schema of a [`Table`]
+/// The schema of a [`Table`](crate::Table)
 pub trait Schema: Eq + Send + Sync + Sized + fmt::Debug {
     /// The type of human-readable identifier used by columns and indices in this [`Schema`]
     type Id: Hash + Eq + Clone + Send + Sync + fmt::Debug + fmt::Display + 'static;
@@ -59,10 +59,10 @@ pub trait Schema: Eq + Send + Sync + Sized + fmt::Debug {
     /// The type of validation error used by this [`Schema`]
     type Error: std::error::Error + From<io::Error>;
 
-    /// The type of column value used by a [`Table`] with this [`Schema`]
+    /// The type of column value used by a [`Table`](crate::Table) with this [`Schema`]
     type Value: Clone + Eq + Send + Sync + fmt::Debug + 'static;
 
-    /// The type of schema used by the indices which compose a [`Table`] with this [`Schema`]
+    /// The type of schema used by the indices which compose a [`Table`](crate::Table) with this [`Schema`]
     type Index: IndexSchema<Error = Self::Error, Id = Self::Id, Value = Self::Value>
         + Send
         + Sync
@@ -81,10 +81,10 @@ pub trait Schema: Eq + Send + Sync + Sized + fmt::Debug {
     /// This is ordered so that the first index which matches a given [`Range`] will be used.
     fn auxiliary(&self) -> &[(String, Self::Index)];
 
-    /// Check that the given `key` is a valid primary key for a [`Table`] with this [`Schema`].
+    /// Check that the given `key` is a valid primary key for a [`Table`](crate::Table) with this [`Schema`].
     fn validate_key(&self, key: Vec<Self::Value>) -> Result<Vec<Self::Value>, Self::Error>;
 
-    /// Check that the given `values` are valid for a row in a [`Table`] with this [`Schema`].
+    /// Check that the given `values` are valid for a row in a [`Table`](crate::Table) with this [`Schema`].
     fn validate_values(&self, values: Vec<Self::Value>) -> Result<Vec<Self::Value>, Self::Error>;
 }
 

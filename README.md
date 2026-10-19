@@ -8,50 +8,11 @@ index root in order. Interrupted creation can leave an incomplete destination.
 index, including their BTree roots; missing indexes are errors. Synchronize initial canonical storage
 before relying on restart loading.
 
-Run `cargo test --all-targets --all-features` to include the strict-load example test.
+Run `cargo test --all-targets --all-features` to include the native integration tests.
 
-Example usage:
-```rust
-use b_table::{Collator, Schema, TableLock};
-
-enum ColumnValue {
-    U64(u64),
-    Str(String),
-}
-
-# ...
-
-// note: b-table provides a Schema trait but not a struct which implements it
-let schema = Schema::new(
-    ["zero", "one", "two", "value"],
-    [
-        ("index_one", ["one", "zero", "two"]),
-        ("index_two", ["two", "zero", "one"]),
-    ]
-);
-
-let key: Vec<ColumnValue> = vec![0.into(), 0.into(), 0.into()];
-let value: Vec<ColumnValue> = vec!["value".into()];
-
-let table = TableLock::create(schema, Collator::new(), dir).await?;
-
-{
-    let mut table = table.write().await; // or table.try_write()?
-    table.upsert(key.clone(), value.clone()).await?;
-    assert_eq!(table.get_value(key.clone())).await?, Ok(Some(value.clone()));
-}
-
-let mut expected_row = key;
-expected_row.extend(value);
-
-{
-    let order = &["two", "one", "zero"];
-    let range = [("one", 0)].into_iter().collect();
-    let table = table.read().await; // or table.try_read()?
-    let mut rows = table.rows(order, range, Some(&["value"]))?;
-    assert_eq!(rows.try_next().await, Ok(Some(expected_row)));
-}
-```
+Callers supply a schema implementation, collator, and delegated directory.
+See the [executable example](examples/example.rs) for construction, mutation,
+selection, and streaming with concrete schema and file adapters.
 
 ## Filesystem codecs
 
@@ -60,6 +21,10 @@ Table delegates block mutation and synchronization to its native index storage.
 multi-index publication. The caller owns recovery from interrupted updates.
 `validate()` checks native trees and auxiliary consistency against primary rows.
 `copy_into()` copies native indexes into empty delegated storage.
+
+Index schemas validate complete rows and nonempty typed routing prefixes.
+Recreate storage containing old copied-minimum internal nodes; loading does not
+migrate or repair it.
 
 File entries implement `freqfs::FileLoad` and `FileSave`. Loads reconstruct the
 same entry type that saves write; typed access validates the resulting entry via
@@ -77,13 +42,16 @@ through ordinary insertion. Errors may leave partial changes, as with other
 native writes; callers own unpublished construction and recovery.
 
 `Table::upsert` replaces an existing primary-key row and updates changed auxiliary
-entries. It returns `true` for insertion and `false` for replacement or an
-unchanged row. `upsert_sorted` remains ordered insertion for construction; it does
-not replace existing primary-key values. Primary replacement preserves row order
-and topology through native B-tree replacement. Rows sharing a primary prefix
-can therefore cause ordering or collator-ambiguity errors. Auxiliary differences
-are applied first; even a primary replacement rejection can leave partial index
-changes. The caller owns recovery.
+entries. It returns `true` for insertion and `false` for replacement. Semantic
+equality does not suppress publication, including in auxiliary indexes.
+`upsert_sorted` remains ordered insertion for construction; it does not replace
+existing primary-key values. Primary replacement preserves row order
+and topology through native B-tree replacement. Point access resolves semantic
+primary-key equality within the collation group; multiple matching rows are an
+ambiguity error before mutation.
+
+Auxiliary differences are applied first; even a primary replacement rejection
+can leave partial index changes. The caller owns recovery.
 
 `Table::try_update` resolves a primary-key row once and lends it to a synchronous,
 fallible callback. The callback returns replacement value columns, or `None` to
@@ -92,9 +60,25 @@ Callback and validation errors are nonmutating; publication retains the partial-
 contract above. The callback must not reacquire the table's write owner.
 
 Row mutations overlap independent auxiliary-index operations within the acquired
-Table write owner. Each index deletes its old entry before inserting the new one;
-primary publication waits for all auxiliary operations. Ordered ingestion retains
-row order while overlapping auxiliary work within each row. Errors cancel unfinished
-siblings and may leave partial auxiliary changes; error/index completion order is
+Table write owner. Semantically equal entries use native replacement; changed
+entries are deleted before insertion. Primary publication waits for all auxiliary
+operations. Ordered ingestion retains row order while overlapping auxiliary work
+within each row. Errors cancel unfinished siblings and may leave partial auxiliary changes; error/index completion order is
 not guaranteed. Index-lock acquisition remains ordered. Concurrent operations may
 retain more cache capacity, with admission delegated to freqfs.
+
+## Timing entrypoint
+
+Run `benchmark_index_mutations` separately from correctness tests. The shared
+comparison runner sets both Rayon and Tokio worker counts. For a direct run:
+
+```sh
+TOKIO_WORKER_THREADS=1 RAYON_NUM_THREADS=1 cargo test --release --features stream --test native benchmark::benchmark_index_mutations -- --exact --ignored --nocapture
+```
+
+Use `4` for both variables to select four workers. Without an explicit
+`TOKIO_WORKER_THREADS`, Tokio uses its ordinary multithreaded runtime default.
+
+The executable example shares its schema and file adapters from `examples/support/`.
+Regression tests live in modules under `tests/native/`, compiled as one `native`
+integration target; test-only observations and directory fixtures live in `tests/common/`.

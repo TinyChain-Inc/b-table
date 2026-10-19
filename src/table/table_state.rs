@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use b_tree::{BTree, collate::Collate};
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
 use futures::future::{self, TryFutureExt};
 use futures::stream::TryStreamExt;
@@ -15,6 +14,7 @@ use super::table_utils::{
 use crate::plan::QueryPlan;
 use crate::schema::{IndexId, IndexSchema, Range};
 use crate::{ColumnRange, IndexStack, Node, Row, Rows};
+use b_tree::{BTree, collate::Collate};
 
 type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
 
@@ -55,14 +55,14 @@ where
     Range<IS::Id, IS::Value>: fmt::Debug,
 {
     pub(super) async fn contains(&self, prefix: &[IS::Value]) -> Result<bool, io::Error> {
-        self.primary.contains(prefix).await
+        Ok(self.get_row(prefix).await?.is_some())
     }
 
     pub(super) async fn get_row(
         &self,
         key: &[IS::Value],
     ) -> Result<Option<Row<IS::Value>>, io::Error> {
-        self.primary.first(b_tree::Range::from_prefix(key)).await
+        self.primary.get(key).await
     }
 
     pub(super) async fn first<'a>(
@@ -455,10 +455,6 @@ where
         row: Vec<IS::Value>,
         previous: Option<&[IS::Value]>,
     ) -> Result<bool, io::Error> {
-        if previous.is_some_and(|old| old == row.as_slice()) {
-            return Ok(false);
-        }
-
         let columns = self.primary.schema().columns();
         let updates = self.auxiliary.values_mut().map(|index| {
             let row = &row;
@@ -468,7 +464,21 @@ where
 
                 if let Some(old) = previous {
                     let old_key = borrow_columns(old, columns, index.schema().columns());
+
                     if key == old_key {
+                        if !index
+                            .replace(
+                                &old_key.into_iter().cloned().collect::<Vec<_>>(),
+                                key.into_iter().cloned().collect(),
+                            )
+                            .await?
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "table index is out of sync",
+                            ));
+                        }
+
                         return Ok(());
                     }
 
@@ -484,6 +494,7 @@ where
                 Ok(())
             }
         });
+
         future::try_join_all(updates).await?;
 
         if let Some(old) = previous {
