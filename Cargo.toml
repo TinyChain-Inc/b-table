@@ -38,3 +38,7 @@ destream = { path = "../destream", version = "0.10" }
 number-general = { path = "../number-general", version = "0.14", features = ["stream"] }
 rand = "0.10"
 tokio = { version = "1.52", features = ["macros"] }
+
+[[test]]
+name = "native"
+required-features = ["stream"]

@@ -2,7 +2,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use b_tree::collate::Collate;
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
 use futures::future::TryFutureExt;
 use futures::stream::{Stream, StreamExt};
@@ -13,6 +12,7 @@ use self::table_state::TableState;
 use self::table_utils::bad_key;
 use super::Node;
 use super::schema::{IndexSchema, Range, Schema, TableSchema};
+use b_tree::collate::Collate;
 
 mod table_lock;
 mod table_state;
@@ -258,11 +258,14 @@ where
     }
 
     /// Insert or update a row in this [`Table`].
-    /// Returns `true` for a new primary key, `false` for replacement or an unchanged row.
-    /// Replacement preserves primary-index order. Multiple rows sharing a primary
-    /// prefix (for example from ordered ingestion) can cause ordering or ambiguity
-    /// errors. Auxiliary changes precede primary replacement: even these errors
-    /// may retain partial native mutations, and callers own recovery.
+    ///
+    /// Returns `true` for a new primary key, `false` for replacement.
+    /// Semantic equality never suppresses publication of the supplied values.
+    ///
+    /// Multiple semantic matches for a primary key are rejected before mutation.
+    /// Replacement preserves primary-index order. Auxiliary changes precede primary
+    /// replacement, so ordering errors may retain partial native mutations;
+    /// callers own recovery.
     pub async fn upsert(
         &mut self,
         key: Vec<S::Value>,
