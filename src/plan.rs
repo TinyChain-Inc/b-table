@@ -67,13 +67,15 @@ impl<'a, K: fmt::Debug> fmt::Debug for IndexQuery<'a, K> {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct QueryPlan<'a, K> {
-    pub indices: IndexStack<(IndexId<'a>, IndexQuery<'a, K>)>,
+    // Queries already contain inline column arrays. Nesting another inline array
+    // here inflates every row-planning future, even for a primary-only scan.
+    pub indices: Vec<(IndexId<'a>, IndexQuery<'a, K>)>,
 }
 
 impl<'a, K> Default for QueryPlan<'a, K> {
     fn default() -> Self {
         Self {
-            indices: IndexStack::default(),
+            indices: Vec::new(),
         }
     }
 }
@@ -473,14 +475,14 @@ mod test {
             ("all key columns", &["0", "1", "2", "3"][..], 1, 3),
         ] {
             let expected = QueryPlan {
-                indices: smallvec![
+                indices: vec![
                     (
                         IndexId::Primary,
-                        IndexQuery::new(0, &["0"], smallvec![&"0"], first_order)
+                        IndexQuery::new(0, &["0"], smallvec![&"0"], first_order),
                     ),
                     (
                         IndexId::Primary,
-                        IndexQuery::new(1, &["1", "2", "3"], smallvec![&"1"], second_order)
+                        IndexQuery::new(1, &["1", "2", "3"], smallvec![&"1"], second_order),
                     ),
                 ],
             };
@@ -514,9 +516,9 @@ mod test {
             ("auxiliary then primary", &["1", "0"][..], 2),
         ] {
             let expected = QueryPlan {
-                indices: smallvec![(
+                indices: vec![(
                     IndexId::Auxiliary("1"),
-                    IndexQuery::new(0, &["1", "0", "2", "3"], smallvec![&"1"], ordered_columns,)
+                    IndexQuery::new(0, &["1", "0", "2", "3"], smallvec![&"1"], ordered_columns),
                 )],
             };
             let actual = QueryPlan::new(&schema, &range, order, schema.key()).expect(name);
@@ -524,12 +526,12 @@ mod test {
         }
 
         let expected = QueryPlan {
-            indices: smallvec![
-                (IndexId::Primary, IndexQuery::new(0, &["0"], smallvec![], 1),),
+            indices: vec![
+                (IndexId::Primary, IndexQuery::new(0, &["0"], smallvec![], 1)),
                 (
                     IndexId::Primary,
                     IndexQuery::new(1, &["1", "2", "3"], smallvec![&"1"], 1),
-                )
+                ),
             ],
         };
 
@@ -596,9 +598,9 @@ mod test {
             ),
         ] {
             let expected = QueryPlan {
-                indices: smallvec![(
+                indices: vec![(
                     IndexId::Auxiliary(index),
-                    IndexQuery::new(0, columns, smallvec![&"1"], ordered_columns,)
+                    IndexQuery::new(0, columns, smallvec![&"1"], ordered_columns),
                 )],
             };
             let actual = QueryPlan::new(&schema, &range, order, schema.key()).expect(name);
