@@ -1,10 +1,9 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::{fmt, io};
+use std::{fmt, io, pin::Pin, sync::Arc};
 
+use b_tree::collate::Collate;
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
 use futures::future::TryFutureExt;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
 use safecast::AsType;
 use smallvec::SmallVec;
 
@@ -12,7 +11,6 @@ use self::table_state::TableState;
 use self::table_utils::bad_key;
 use super::Node;
 use super::schema::{IndexSchema, Range, Schema, TableSchema};
-use b_tree::collate::Collate;
 
 mod table_lock;
 mod table_state;
@@ -81,13 +79,27 @@ where
         range: Range<S::Id, S::Value>,
         order: &[S::Id],
         select: Option<&[S::Id]>,
-    ) -> Result<Option<Row<S::Value>>, io::Error> {
+    ) -> Result<Option<Row<S::Value>>, io::Error>
+    where
+        C: Clone + Send + Sync,
+        G: Sync,
+    {
         let range = range.into_inner();
         let select = select.unwrap_or(self.schema.key());
-        let plan = self.schema.plan_query(&range, order, self.schema.key())?;
+        let index = self.schema.query_index(&range, order)?;
+        if select.is_empty()
+            || select
+                .iter()
+                .any(|column| !self.schema.primary().columns().contains(column))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid column selection: {select:?}"),
+            ));
+        }
 
         self.state
-            .first(&plan, &range, select, self.schema.key())
+            .first(index, &range, select, self.schema.key())
             .await
     }
 
@@ -123,18 +135,22 @@ where
     /// Count how many rows in this [`Table`] lie within the given `range`.
     pub async fn count(&self, range: Range<S::Id, S::Value>) -> Result<u64, io::Error> {
         let range = range.into_inner();
-        let plan = self.schema.plan_query(&range, &[], self.schema.key())?;
-        self.state.count(plan, range, self.schema.key()).await
+        let index = self.schema.query_index(&range, &[])?;
+        self.state.count(index, range, self.schema.key()).await
     }
 
     /// Return `true` if the given [`Range`] of this [`Table`] does not contain any rows.
     pub async fn is_empty(&self, range: Range<S::Id, S::Value>) -> Result<bool, io::Error> {
         let range = range.into_inner();
-        let plan = self.schema.plan_query(&range, &[], Default::default())?;
-        self.state.is_empty(plan, range, self.schema.key()).await
+        let index = self.schema.query_index(&range, &[])?;
+        self.state.is_empty(index, range, self.schema.key()).await
     }
 
     /// Construct a [`Stream`] of the `select`ed columns of the [`Rows`] within the given `range`.
+    ///
+    /// One index must support every constraint and the literal ordering prefix.
+    /// Constraints are leading equalities followed by at most one range.
+    /// Unsupported combinations return [`io::ErrorKind::Unsupported`] before traversal.
     pub async fn rows<'a>(
         &'a self,
         range: Range<S::Id, S::Value>,
@@ -147,10 +163,20 @@ where
 
         let range = range.into_inner();
         let select = select.unwrap_or(self.schema.primary().columns());
-        let plan = self.schema.plan_query(&range, order, self.schema.key())?;
+        let index = self.schema.query_index(&range, order)?;
+        if select.is_empty()
+            || select
+                .iter()
+                .any(|column| !self.schema.primary().columns().contains(column))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid column selection: {select:?}"),
+            ));
+        }
 
         self.state
-            .rows(plan, range, reverse, select, self.schema.key())
+            .rows(index, range, reverse, select, self.schema.key())
             .await
     }
 
@@ -204,57 +230,11 @@ where
         log::debug!("Table::delete_range {range:?}");
 
         let range = range.into_inner();
-        let plan = self.schema.plan_query(&range, &[], self.schema.key())?;
+        let index = self.schema.query_index(&range, &[])?;
 
         self.state
-            .delete_range(plan, range, self.schema.key())
+            .delete_range(index, range, self.schema.key())
             .await
-    }
-
-    /// Delete all rows from the `other` table from this one.
-    /// The `other` table **must** have an identical schema and collation.
-    pub async fn delete_all(
-        &mut self,
-        other: TableReadGuard<S, S::Index, C, FE>,
-    ) -> Result<(), io::Error> {
-        // no need to check the collator for equality, that will be done in the index operations
-
-        // but do check that the indices to merge are the same
-        if self.schema != other.schema {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "cannot delete the contents of a table with schema {:?} from one with schema {:?}",
-                    other.schema.inner(),
-                    self.schema.inner()
-                ),
-            ));
-        }
-
-        self.state.delete_all(other.state).await
-    }
-
-    /// Insert all rows from the `other` table into this one.
-    /// The `other` table **must** have an identical schema and collation.
-    pub async fn merge(
-        &mut self,
-        other: TableReadGuard<S, S::Index, C, FE>,
-    ) -> Result<(), io::Error> {
-        // no need to check the collator for equality, that will be done in the merge operations
-
-        // but do check that the indices to merge are the same
-        if self.schema != other.schema {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "cannot merge a table with schema {:?} into one with schema {:?}",
-                    other.schema.inner(),
-                    self.schema.inner()
-                ),
-            ));
-        }
-
-        self.state.merge(other.state).await
     }
 
     /// Insert or update a row in this [`Table`].
@@ -282,67 +262,6 @@ where
             .upsert(row, previous.as_deref())
             .map_err(S::Error::from)
             .await
-    }
-
-    /// Resolve a row once and synchronously compute its replacement value columns.
-    /// The callback borrows the complete previous row, or `None` when absent.
-    /// Returning `None` deletes an existing row; an absent row remains absent.
-    /// The primary key is fixed. The callback runs under this table's write owner
-    /// and must not reacquire it. Callback and value-validation errors are nonmutating.
-    /// Index publication retains [`Self::upsert`]'s partial-mutation contract.
-    pub async fn try_update<E>(
-        &mut self,
-        key: Vec<S::Value>,
-        update: impl FnOnce(Option<&[S::Value]>) -> Result<Option<Vec<S::Value>>, E>,
-    ) -> Result<(), E>
-    where
-        E: From<S::Error>,
-    {
-        let mut key = self.schema.validate_key(key).map_err(E::from)?;
-        let previous = self.state.get_row(&key).await.map_err(S::Error::from)?;
-
-        if let Some(values) = update(previous.as_deref())? {
-            let values = self.schema.validate_values(values).map_err(E::from)?;
-            key.reserve_exact(values.len());
-            key.extend(values);
-            self.state
-                .upsert(key, previous.as_deref())
-                .await
-                .map_err(S::Error::from)?;
-        } else if let Some(previous) = previous {
-            self.state
-                .remove_row(&previous)
-                .await
-                .map_err(S::Error::from)?;
-        }
-
-        Ok(())
-    }
-
-    /// Append key/value pairs in primary-index order, at or beyond its maximum.
-    /// This ordered insertion path does not replace existing primary-key values.
-    /// Returns the number of new rows. Like `upsert`, an error may retain a
-    /// partially inserted prefix; callers own unpublished construction/recovery.
-    pub async fn upsert_sorted<R>(&mut self, rows: R) -> Result<u64, io::Error>
-    where
-        R: Stream<Item = Result<(Vec<S::Value>, Vec<S::Value>), io::Error>> + Send,
-        S::Id: Sync,
-    {
-        let schema = &self.schema;
-        let rows = rows.map(|row| {
-            let (key, values) = row?;
-            let mut key = schema
-                .validate_key(key)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-            key.extend(
-                schema
-                    .validate_values(values)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
-            );
-            Ok(key)
-        });
-
-        self.state.upsert_sorted(rows).await
     }
 
     /// Delete all rows from this [`Table`].

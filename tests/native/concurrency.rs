@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
     const ROOT: &str = "00000000-0000-0000-0000-000000000000";
-    for operation in ["insert", "update", "delete", "ordered"] {
+    for operation in ["insert", "update", "delete"] {
         for cancel in [false, true] {
             let fixture = TestDir::new("test_table")?;
             let path = fixture.path().to_owned();
@@ -63,23 +63,10 @@ async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
                             assert!(owner.upsert(vec![2.into()], values()).await?);
                         }
                         "update" => {
-                            owner
-                                .try_update(vec![1.into()], |_| Ok::<_, io::Error>(Some(values())))
-                                .await?;
+                            assert!(!owner.upsert(vec![1.into()], values()).await?);
                         }
                         "delete" => {
                             assert!(owner.delete_row(&[1.into()]).await?);
-                        }
-                        "ordered" => {
-                            assert_eq!(
-                                owner
-                                    .upsert_sorted(futures::stream::iter([Ok((
-                                        vec![2.into()],
-                                        values()
-                                    ))]))
-                                    .await?,
-                                1
-                            );
                         }
                         _ => unreachable!(),
                     }

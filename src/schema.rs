@@ -1,13 +1,14 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::ops::{Bound, Deref};
-use std::{fmt, io, iter};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fmt,
+    hash::Hash,
+    io, iter,
+    ops::{Bound, Deref},
+};
 
 pub use b_tree::Schema as BTreeSchema;
 use b_tree::collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
-
-use crate::plan::QueryPlan;
 
 /// An ID type used to look up a specific table index
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Default)]
@@ -111,6 +112,17 @@ where
     C::Value: fmt::Debug,
     std::ops::Range<C::Value>: OverlapsRange<std::ops::Range<C::Value>, C>,
 {
+    fn contains(&self, other: &Self, collator: &C) -> bool {
+        match (self, other) {
+            (_, Self::In(bounds)) if !valid_bounds(&bounds.0, &bounds.1, collator) => true,
+            (Self::In(bounds), _) if !valid_bounds(&bounds.0, &bounds.1, collator) => false,
+            _ => matches!(
+                self.overlaps(other, collator),
+                Overlap::Wide | Overlap::Equal
+            ),
+        }
+    }
+
     fn overlaps(&self, other: &Self, collator: &C) -> Overlap {
         match (self, other) {
             (Self::Eq(this), Self::Eq(that)) => match collator.cmp(this, that) {
@@ -118,14 +130,16 @@ where
                 Ordering::Equal => Overlap::Equal,
                 Ordering::Greater => Overlap::Greater,
             },
-            (Self::In(this), Self::Eq(that)) => this.overlaps_value(that, collator),
+            (Self::In(this), Self::Eq(that)) => match this.overlaps_value(that, collator) {
+                Overlap::WideLess | Overlap::WideGreater => Overlap::Wide,
+                overlap => overlap,
+            },
             (Self::Eq(this), Self::In(that)) => match that.overlaps_value(this, collator) {
+                Overlap::Empty => Overlap::Empty,
                 Overlap::Equal => Overlap::Equal,
 
                 Overlap::Less => Overlap::Greater,
-                Overlap::WideLess => Overlap::WideGreater,
-                Overlap::Wide => Overlap::Narrow,
-                Overlap::WideGreater => Overlap::WideLess,
+                Overlap::WideLess | Overlap::Wide | Overlap::WideGreater => Overlap::Narrow,
                 Overlap::Greater => Overlap::Less,
 
                 Overlap::Narrow => unreachable!("{:?} is narrower than {:?}", that, this),
@@ -221,6 +235,12 @@ impl<K: Clone + Eq + Hash, V: Clone> Range<K, V> {
     where
         C: Collate<Value = V>,
     {
+        if self.columns.values().chain(other.columns.values()).any(|column| {
+            matches!(column, ColumnRange::In(bounds) if !valid_bounds(&bounds.0, &bounds.1, collator))
+        }) {
+            return None;
+        }
+
         let mut columns = self.columns.clone();
         for (name, other) in other.columns {
             let intersection = match columns.remove(&name) {
@@ -247,32 +267,15 @@ where
             (collator.cmp(&left, &right) == Ordering::Equal).then_some(ColumnRange::Eq(left))
         }
         (ColumnRange::Eq(value), ColumnRange::In(bounds))
-        | (ColumnRange::In(bounds), ColumnRange::Eq(value)) => {
-            contains(&bounds, &value, collator).then_some(ColumnRange::Eq(value))
-        }
+        | (ColumnRange::In(bounds), ColumnRange::Eq(value)) => bounds
+            .contains_value(&value, collator)
+            .then_some(ColumnRange::Eq(value)),
         (ColumnRange::In(left), ColumnRange::In(right)) => {
             let lower = max_lower(left.0, right.0, collator);
             let upper = min_upper(left.1, right.1, collator);
             valid_bounds(&lower, &upper, collator).then_some(ColumnRange::In((lower, upper)))
         }
     }
-}
-
-fn contains<C>(bounds: &(Bound<C::Value>, Bound<C::Value>), value: &C::Value, collator: &C) -> bool
-where
-    C: Collate,
-{
-    let above_lower = match &bounds.0 {
-        Bound::Unbounded => true,
-        Bound::Included(lower) => collator.cmp(value, lower) != Ordering::Less,
-        Bound::Excluded(lower) => collator.cmp(value, lower) == Ordering::Greater,
-    };
-    let below_upper = match &bounds.1 {
-        Bound::Unbounded => true,
-        Bound::Included(upper) => collator.cmp(value, upper) != Ordering::Greater,
-        Bound::Excluded(upper) => collator.cmp(value, upper) == Ordering::Less,
-    };
-    above_lower && below_upper
 }
 
 fn max_lower<C>(left: Bound<C::Value>, right: Bound<C::Value>, collator: &C) -> Bound<C::Value>
@@ -326,42 +329,6 @@ where
             Bound::Included(lower) | Bound::Excluded(lower),
             Bound::Included(upper) | Bound::Excluded(upper),
         ) => collator.cmp(lower, upper) == Ordering::Less,
-    }
-}
-
-impl<C, K> OverlapsRange<Self, C> for Range<K, C::Value>
-where
-    K: Eq + Hash,
-    C: Collate,
-    C::Value: fmt::Debug,
-{
-    fn overlaps(&self, other: &Self, collator: &C) -> Overlap {
-        let mut overlap: Option<Overlap> = None;
-
-        // handle the case that there is a column absent in this range but not the other
-        for name in other.columns.keys() {
-            if !self.columns.contains_key(name) {
-                return Overlap::Wide;
-            }
-        }
-
-        for (name, this) in &self.columns {
-            let column_overlap = other
-                .columns
-                .get(name)
-                .map(|that| this.overlaps(that, collator))
-                // handle the case that there is a column present in this range but not the other
-                .unwrap_or(Overlap::Narrow);
-
-            if let Some(overlap) = overlap.as_mut() {
-                *overlap = overlap.then(column_overlap);
-            } else {
-                overlap = Some(column_overlap);
-            }
-        }
-
-        // handle the case that both ranges are empty
-        overlap.unwrap_or(Overlap::Equal)
     }
 }
 
@@ -433,39 +400,30 @@ impl<S> TableSchema<S> {
 }
 
 impl<S: Schema> TableSchema<S> {
-    #[inline]
-    pub fn get_index<'a>(&'a self, index_id: IndexId<'a>) -> Option<&'a S::Index> {
-        match index_id {
-            IndexId::Primary => Some(self.primary()),
-            IndexId::Auxiliary(index_id) => self
-                .auxiliary()
-                .iter()
-                .filter_map(|(name, index)| if name == index_id { Some(index) } else { None })
-                .next(),
-        }
-    }
-
-    pub fn index_ids(&self) -> impl Iterator<Item = IndexId<'_>> {
-        let aux = self.inner.auxiliary().iter().map(|(name, _)| name.into());
-
-        iter::once(IndexId::Primary).chain(aux)
-    }
-
-    pub fn plan_query<'a>(
-        &'a self,
+    // Choose by schema order, independently of projection or physical index storage.
+    pub fn query_index(
+        &self,
         range: &HashMap<S::Id, ColumnRange<S::Value>>,
-        order: &'a [S::Id],
-        select: &'a [S::Id],
-    ) -> Result<QueryPlan<'a, S::Id>, io::Error> {
-        QueryPlan::new(self, range, order, select).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "{:?} has no index to support range {range:?} and order {order:?}",
-                    self.inner
-                ),
-            )
-        })
+        order: &[S::Id],
+    ) -> Result<IndexId<'_>, io::Error> {
+        iter::once((IndexId::Primary, self.primary()))
+            .chain(self.auxiliary().iter().map(|(name, index)| {
+                (IndexId::Auxiliary(name.as_str()), index)
+            }))
+            .find_map(|(id, index)| {
+                let columns = index.columns();
+                (range_is_supported(range, columns) && columns.starts_with(order))
+                    .then_some(id)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "{:?} has no index to support range {range:?} and order {order:?}; use a matching composite index or rewrite the predicate as leading equalities followed by at most one range",
+                        self.inner
+                    ),
+                )
+            })
     }
 }
 
@@ -534,5 +492,78 @@ mod tests {
         let outer = range(Bound::Included(1), Bound::Excluded(2));
         let inner = range(Bound::Included(2), Bound::Excluded(3));
         assert!(outer.intersection(inner, &Collator::default()).is_none());
+        for (lower, upper) in [
+            (Bound::Included(2), Bound::Excluded(2)),
+            (Bound::Excluded(2), Bound::Included(2)),
+            (Bound::Included(3), Bound::Included(1)),
+        ] {
+            let empty = range(lower, upper);
+            for other in [
+                Range::default(),
+                range(Bound::Unbounded, Bound::Unbounded),
+                [("other", ColumnRange::Eq(2))].into_iter().collect(),
+            ] {
+                assert!(
+                    empty
+                        .intersection(other.clone(), &Collator::default())
+                        .is_none()
+                );
+                assert!(
+                    other
+                        .intersection(empty.clone(), &Collator::default())
+                        .is_none()
+                );
+            }
+        }
+        assert!(
+            range(Bound::Included(2), Bound::Included(2))
+                .intersection(Range::default(), &Collator::default())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn column_range_containment_matches_bounds() {
+        #[derive(Eq, PartialEq)]
+        struct Decade;
+
+        impl b_tree::collate::Collate for Decade {
+            type Value = u64;
+
+            fn cmp(&self, left: &u64, right: &u64) -> Ordering {
+                (left / 10).cmp(&(right / 10))
+            }
+        }
+
+        let c = Collator::default();
+        let full = ColumnRange::In((Bound::Included(1u64), Bound::Included(3)));
+        for point in [1, 2, 3] {
+            assert!(full.contains(&ColumnRange::Eq(point), &c));
+            assert_eq!(full.overlaps(&ColumnRange::Eq(point), &c), Overlap::Wide);
+            assert_eq!(ColumnRange::Eq(point).overlaps(&full, &c), Overlap::Narrow);
+        }
+        assert!(!full.contains(&ColumnRange::Eq(0), &c));
+        assert!(ColumnRange::Eq(11).contains(&ColumnRange::Eq(19), &Decade));
+        let equivalent = range(Bound::Included(11), Bound::Included(21))
+            .intersection([("id", ColumnRange::Eq(29))].into_iter().collect(), &Decade)
+            .unwrap();
+        assert_eq!(equivalent.get(&"id"), Some(&ColumnRange::Eq(29)));
+        let singleton = ColumnRange::In((Bound::Included(1), Bound::Included(1)));
+        assert_eq!(singleton.overlaps(&ColumnRange::Eq(1), &c), Overlap::Equal);
+        for empty in [
+            ColumnRange::In((Bound::Included(2), Bound::Excluded(2))),
+            ColumnRange::In((Bound::Included(3), Bound::Included(1))),
+        ] {
+            assert!(full.contains(&empty, &c));
+            assert!(empty.contains(&empty, &c));
+            assert!(ColumnRange::Eq(1).contains(&empty, &c));
+            assert!(!empty.contains(&full, &c));
+            assert!(!empty.contains(&ColumnRange::Eq(1), &c));
+            assert!(!full.contains_partial(&empty, &c));
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/query_index.rs"]
+mod query_tests;

@@ -1,12 +1,14 @@
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::{fmt, io, mem};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::Hash,
+    io, mem,
+};
 
 use b_tree::Key;
-use smallvec::smallvec;
 
+use super::PRIMARY;
 use crate::IndexStack;
-use crate::plan::IndexQuery;
 use crate::schema::{ColumnRange, IndexSchema, Schema};
 
 #[inline]
@@ -46,50 +48,6 @@ where
 }
 
 #[inline]
-pub(super) fn clone_columns<K, V>(row: &[V], columns_in: &[K], columns_out: &[K]) -> Vec<V>
-where
-    K: Eq,
-    V: Clone,
-{
-    selected_columns(row, columns_in, columns_out)
-        .cloned()
-        .collect()
-}
-
-#[inline]
-pub(super) fn extract_columns<K, V>(mut row: Key<V>, columns_in: &[K], columns_out: &[K]) -> Key<V>
-where
-    K: Eq + fmt::Debug,
-    V: Default + Clone + fmt::Debug,
-{
-    assert_eq!(
-        row.len(),
-        columns_in.len(),
-        "row {row:?} does not match column schema {columns_in:?}"
-    );
-
-    debug_assert!(
-        columns_out
-            .iter()
-            .all(|col_name| columns_in.contains(col_name)),
-        "input columns {columns_in:?} are missing some output columns {columns_out:?}"
-    );
-
-    let mut selection = smallvec![V::default(); columns_out.len()];
-
-    for (i_to, name_out) in columns_out.iter().enumerate() {
-        let i_from = columns_in
-            .iter()
-            .position(|name_in| name_in == name_out)
-            .expect("column index");
-
-        mem::swap(&mut row[i_from], &mut selection[i_to]);
-    }
-
-    selection
-}
-
-#[inline]
 pub(super) fn bad_key<V: fmt::Debug>(key: &[V], key_len: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -106,7 +64,21 @@ pub(super) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
         ));
     }
 
+    let mut names = HashSet::with_capacity(schema.auxiliary().len());
     for (index_name, index) in schema.auxiliary() {
+        if index_name == PRIMARY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("reserved Table index name: {index_name}"),
+            ));
+        }
+        if !names.insert(index_name.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("duplicate Table index name: {index_name}"),
+            ));
+        }
+
         if index.columns().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -123,9 +95,7 @@ pub(super) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
             }
         }
 
-        // note: it's inefficient to remove this requirement
-        // because it would break the assumption
-        // that every key constructed by merging two indices exists in the primary index
+        // Noncovering queries need every primary-key column for exact lookup.
         for col_name in schema.key() {
             if !index.columns().contains(col_name) {
                 return Err(io::Error::new(
@@ -137,31 +107,6 @@ pub(super) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
     }
 
     Ok(())
-}
-
-#[inline]
-pub(super) fn index_range_borrow<'a, K: Eq + Hash, V>(
-    columns: &[K],
-    range: &'a HashMap<K, ColumnRange<V>>,
-) -> b_tree::Range<&'a V> {
-    let mut prefix = Key::with_capacity(range.len());
-
-    for col_name in columns {
-        if let Some(col_range) = range.get(col_name) {
-            match col_range {
-                ColumnRange::Eq(value) => {
-                    prefix.push(value);
-                }
-                ColumnRange::In((start, end)) => {
-                    return b_tree::Range::with_bounds(prefix, (start.as_ref(), end.as_ref()));
-                }
-            }
-        } else {
-            break;
-        }
-    }
-
-    b_tree::Range::from_prefix(prefix)
 }
 
 #[inline]
@@ -189,34 +134,6 @@ pub(super) fn index_range_for<K: Eq + Hash, V>(
     b_tree::Range::from_prefix(prefix)
 }
 
-#[inline]
-pub(super) fn inner_range_for<'a, K, V>(
-    query: &IndexQuery<'a, K>,
-    range: &HashMap<K, ColumnRange<V>>,
-) -> b_tree::Range<V>
-where
-    K: Eq + Hash + fmt::Debug,
-    V: Clone,
-{
-    let mut inner_range = Key::with_capacity(query.range().len());
-    let mut range_columns = query.range().into_iter();
-
-    let inner_range = loop {
-        if let Some(col_name) = range_columns.next() {
-            match range.get(col_name).cloned().expect("column range") {
-                ColumnRange::Eq(value) => inner_range.push(value),
-                ColumnRange::In(bounds) => break b_tree::Range::with_bounds(inner_range, bounds),
-            }
-        } else {
-            break b_tree::Range::from(inner_range);
-        }
-    };
-
-    assert!(range_columns.next().is_none());
-
-    inner_range
-}
-
 pub(super) fn prefix_extractor<K, V>(
     columns_in: &[K],
     columns_out: &[K],
@@ -225,7 +142,6 @@ where
     K: PartialEq + fmt::Debug,
     V: Default + Clone,
 {
-    debug_assert!(columns_out.len() <= columns_in.len());
     debug_assert!(!columns_out.is_empty());
     debug_assert!(
         columns_out.iter().all(|id| columns_in.contains(id)),
@@ -245,13 +161,29 @@ where
         })
         .collect::<IndexStack<_>>();
 
+    let mut remaining = vec![0_usize; columns_in.len()];
+    for &index in &indices {
+        remaining[index] += 1;
+    }
+
+    let indices: IndexStack<_> = indices
+        .into_iter()
+        .map(|index| {
+            remaining[index] -= 1;
+            (index, remaining[index] == 0)
+        })
+        .collect();
+
     move |mut key| {
-        let mut prefix = smallvec![V::default(); indices.len()];
-
-        for (i_to, i_from) in indices.iter().copied().enumerate() {
-            mem::swap(&mut key[i_from], &mut prefix[i_to]);
-        }
-
-        prefix
+        indices
+            .iter()
+            .map(|&(index, last)| {
+                if last {
+                    mem::take(&mut key[index])
+                } else {
+                    key[index].clone()
+                }
+            })
+            .collect()
     }
 }

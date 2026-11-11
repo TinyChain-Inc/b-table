@@ -1,22 +1,18 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::{fmt, io};
+use std::{collections::HashMap, fmt, io, sync::Arc};
 
+use b_tree::BTree;
+use b_tree::collate::Collate;
 use freqfs::{DirDeref, DirReadGuardOwned, DirWriteGuardOwned, FileLoad};
-use futures::future::{self, TryFutureExt};
+use futures::future;
 use futures::stream::TryStreamExt;
 use safecast::AsType;
 
-use super::table_utils::{
-    borrow_columns, clone_columns, extract_columns, index_range_borrow, index_range_for,
-    inner_range_for, prefix_extractor,
-};
-use crate::plan::QueryPlan;
+use super::table_utils::{borrow_columns, index_range_for, prefix_extractor};
 use crate::schema::{IndexId, IndexSchema, Range};
-use crate::{ColumnRange, IndexStack, Node, Row, Rows};
-use b_tree::{BTree, collate::Collate};
+use crate::{ColumnRange, IndexStack, Node, Row};
 
-type KeyStream<'a, V, Id> = (b_tree::Keys<V>, &'a [Id]);
+type ScopedRows<'a, V> =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Row<V>, io::Error>> + Send + 'a>>;
 
 pub(super) struct TableState<IS, C, G> {
     // IMPORTANT! the auxiliary field must go before primary so that it will be dropped first
@@ -35,11 +31,8 @@ impl<IS, C: Clone, G: Clone> Clone for TableState<IS, C, G> {
 
 impl<IS, C, G> TableState<IS, C, G> {
     #[inline]
-    fn get_index<'a, Id>(&'a self, index_id: Id) -> Option<&'a BTree<IS, C, G>>
-    where
-        IndexId<'a>: From<Id>,
-    {
-        match index_id.into() {
+    fn get_index(&self, index_id: IndexId<'_>) -> Option<&BTree<IS, C, G>> {
+        match index_id {
             IndexId::Primary => Some(&self.primary),
             IndexId::Auxiliary(index_id) => self.auxiliary.get(index_id),
         }
@@ -62,68 +55,33 @@ where
         &self,
         key: &[IS::Value],
     ) -> Result<Option<Row<IS::Value>>, io::Error> {
-        self.primary.get(key).await
+        // Unlike a general tree prefix, a Table primary key must be unique.
+        self.primary
+            .get(key)
+            .await
+            .map_err(freqfs::IntegrityError::from_read)
     }
 
-    pub(super) async fn first<'a>(
+    pub(super) async fn first(
         &self,
-        plan: &QueryPlan<'a, IS::Id>,
+        index: IndexId<'_>,
         range: &HashMap<IS::Id, ColumnRange<IS::Value>>,
         select: &[IS::Id],
         key_columns: &[IS::Id],
-    ) -> Result<Option<Row<IS::Value>>, io::Error> {
-        let mut plan = plan.indices.iter();
-
-        let (mut first, mut columns) = if let Some((index_id, _query)) = plan.next() {
-            let index = self.get_index(*index_id).expect("index");
-            let columns = index.schema().columns();
-            let index_range = index_range_borrow(columns, range);
-
-            if let Some(first) = index.first(index_range).await? {
-                (first, columns)
-            } else {
-                return Ok(None);
-            }
-        } else {
-            let index_range = index_range_borrow(self.primary.schema().columns(), range);
-
-            return self
-                .primary
-                .first(index_range)
-                .map_ok(|first| {
-                    first.map(|first| {
-                        extract_columns(first, self.primary.schema().columns(), select)
-                    })
-                })
-                .await;
-        };
-
-        for (index_id, _query) in plan {
-            let index = self.get_index(*index_id).expect("index");
-
-            columns = index.schema().columns();
-
-            let index_range = index_range_borrow(columns, range);
-
-            first = if let Some(key) = index.first(index_range).await? {
-                key
-            } else {
-                return Ok(None);
-            }
-        }
-
-        if !select.iter().all(|col_name| columns.contains(col_name)) {
-            let pk = extract_columns(first, columns, key_columns);
-
-            first = self
-                .get_row(&pk)
-                .map_ok(|maybe_row| maybe_row.expect("row"))
+    ) -> Result<Option<Row<IS::Value>>, io::Error>
+    where
+        C: Clone + Send + Sync,
+        G: Sync,
+    {
+        let primary = self.primary.as_ref();
+        let index = self
+            .get_index(index)
+            .expect("selected schema index")
+            .as_ref();
+        let mut rows =
+            TableState::index_rows(&primary, index, range.clone(), false, select, key_columns)
                 .await?;
-
-            columns = self.primary.schema().columns();
-        }
-
-        Ok(Some(extract_columns(first, columns, select)))
+        rows.try_next().await
     }
 }
 
@@ -132,19 +90,18 @@ where
     IS: IndexSchema,
     C: Collate<Value = IS::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<IS::Value>> + Send + Sync + 'static + FileLoad,
-    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
+    G: DirDeref<Entry = FE> + Clone + Send + Sync,
     Range<IS::Id, IS::Value>: fmt::Debug,
 {
     pub(super) async fn count<'a>(
         &'a self,
-        plan: QueryPlan<'a, IS::Id>,
+        index: IndexId<'_>,
         range: HashMap<IS::Id, ColumnRange<IS::Value>>,
         key_columns: &'a [IS::Id],
     ) -> Result<u64, io::Error> {
-        // TODO: optimize
-        let mut rows = self
-            .rows(plan, range, false, key_columns, key_columns)
-            .await?;
+        // Zero-field projection retains scan ordering and validation without
+        // cloning values that this predicate would immediately discard.
+        let mut rows = self.rows(index, range, false, &[], key_columns).await?;
 
         let mut count = 0;
         while let Some(_row) = rows.try_next().await? {
@@ -156,189 +113,112 @@ where
 
     pub(super) async fn is_empty<'a>(
         &'a self,
-        plan: QueryPlan<'a, IS::Id>,
+        index: IndexId<'_>,
         range: HashMap<IS::Id, ColumnRange<IS::Value>>,
         key_columns: &'a [IS::Id],
     ) -> Result<bool, io::Error> {
-        self.first(&plan, &range, key_columns, key_columns)
-            .map_ok(|maybe_row| maybe_row.is_none())
-            .await
+        let mut rows = self.rows(index, range, false, &[], key_columns).await?;
+        rows.try_next().await.map(|row| row.is_none())
     }
 
-    // note: it would be clearer to implement this recursively but it would require removing the lifetime parameter
-    pub(super) async fn rows<'a>(
-        &'a self,
-        mut plan: QueryPlan<'a, IS::Id>,
+    pub(super) async fn rows<'s>(
+        &self,
+        index: IndexId<'_>,
+        range: HashMap<IS::Id, ColumnRange<IS::Value>>,
+        reverse: bool,
+        select: &[IS::Id],
+        key_columns: &[IS::Id],
+    ) -> Result<ScopedRows<'s, IS::Value>, io::Error>
+    where
+        G: 's,
+    {
+        let index = self.get_index(index).expect("selected schema index");
+        Self::index_rows(
+            &self.primary,
+            index.clone(),
+            range,
+            reverse,
+            select,
+            key_columns,
+        )
+        .await
+    }
+
+    async fn index_rows<'s>(
+        primary: &BTree<IS, C, G>,
+        index: BTree<IS, C, G>,
         mut range: HashMap<IS::Id, ColumnRange<IS::Value>>,
         reverse: bool,
-        select: &'a [IS::Id],
-        key_columns: &'a [IS::Id],
-    ) -> Result<Rows<IS::Value>, io::Error> {
-        #[cfg(feature = "logging")]
-        log::debug!("construct row stream with plan {plan:?}");
+        select: &[IS::Id],
+        key_columns: &[IS::Id],
+    ) -> Result<ScopedRows<'s, IS::Value>, io::Error>
+    where
+        G: 's,
+    {
+        let columns = index.schema().columns();
+        let index_range = index_range_for(columns, &mut range);
+        assert!(range.is_empty(), "selected index supports every constraint");
 
-        let mut keys: Option<KeyStream<'a, IS::Value, IS::Id>> = None;
-
-        let last_query = plan.indices.pop();
-
-        if let Some((index_id, query)) = plan.indices.first() {
-            assert_eq!(query.prefix_len(), 0);
-            let index = self.get_index(*index_id).expect("index");
-
-            let columns = &index.schema().columns()[..query.selected()];
-            assert!(query.range().iter().zip(columns).all(|(r, c)| *r == c));
-
-            let index_range = index_range_for(&columns[..query.range().len()], &mut range);
-            let index_prefixes = index
-                .clone()
-                .groups(index_range, columns.len(), reverse)
-                .await?;
-
-            keys = Some((index_prefixes, columns));
-        }
-
-        // for each index before the last
-        for (index_id, query) in plan.indices.into_iter().skip(1) {
-            // merge all unique prefixes beginning with each prefix
-
-            let index = self.get_index(index_id).expect("index");
-
-            let (prefixes, columns_in) = keys.take().expect("prefixes");
-
-            let columns_out = &index.schema().columns()[..query.selected()];
-
-            assert_eq!(query.prefix_len(), columns_in.len());
-            assert!(columns_out.len() > columns_in.len());
-            assert!(query.range().iter().zip(columns_out).all(|(r, c)| *r == c));
-
-            debug_assert!(
-                columns_out
+        let covering = select.iter().all(|column| columns.contains(column));
+        let required = if covering { select } else { key_columns };
+        let positions: Vec<_> = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(position, column)| required.contains(column).then_some(position))
+            .collect();
+        let requested: IndexStack<_> = required
+            .iter()
+            .map(|column| {
+                columns
                     .iter()
-                    .take(columns_in.len())
-                    .all(|c| columns_in.contains(c))
-            );
+                    .position(|stored| stored == column)
+                    .expect("column")
+            })
+            .collect();
+        let extract = (positions.as_slice() != requested.as_slice())
+            .then(|| prefix_extractor(&positions, &requested));
 
-            let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
-
-            let inner_range = inner_range_for(&query, &range);
-
-            let n = columns_out.len();
-            let index = index.clone();
-
-            let index_prefixes = prefixes
-                .map_ok(extract_prefix)
-                .map_ok(move |prefix| inner_range.clone().prepend(prefix))
-                .map_ok(move |index_range| {
-                    let index = index.clone();
-                    async move { index.groups(index_range, n, reverse).await }
-                })
-                .try_buffered(num_cpus::get())
-                .try_flatten();
-
-            keys = Some((Box::pin(index_prefixes), columns_out))
-        }
-
-        if let Some((index_id, query)) = last_query {
-            if let Some((prefixes, columns_in)) = keys.take() {
-                // merge streams of all keys in the last index beginning with each prefix
-
-                assert_eq!(query.prefix_len(), columns_in.len());
-
-                let index = self.get_index(index_id).expect("index");
-
-                let columns_out = &index.schema().columns();
-
-                debug_assert!(
-                    columns_out.len() > columns_in.len(),
-                    "cannot select {columns_out:?} with prefix {columns_in:?}"
-                );
-
-                debug_assert!(
-                    columns_out
-                        .iter()
-                        .take(columns_in.len())
-                        .all(|c| columns_in.contains(c))
-                );
-
-                let extract_prefix = prefix_extractor(columns_in, &columns_out[..columns_in.len()]);
-
-                let inner_range = inner_range_for(&query, &range);
-
-                let index = index.clone();
-
-                let index_keys = prefixes
-                    .map_ok(extract_prefix)
-                    .map_ok(move |prefix| inner_range.clone().prepend(prefix))
-                    .map_ok(move |index_range| {
-                        let index = index.clone();
-                        async move {
-                            if reverse {
-                                index.keys_rev(index_range).await
-                            } else {
-                                index.keys(index_range).await
-                            }
-                        }
-                    })
-                    .try_buffered(num_cpus::get())
-                    .try_flatten();
-
-                keys = Some((Box::pin(index_keys), columns_out))
-            } else {
-                let index = self.get_index(index_id).expect("index");
-                let columns = index.schema().columns();
-
-                let index_range = index_range_for(columns, &mut range);
-                assert!(range.is_empty());
-
-                let index_keys = if reverse {
-                    index.clone().keys_rev(index_range).await?
-                } else {
-                    index.clone().keys(index_range).await?
-                };
-                keys = Some((Box::pin(index_keys), columns));
-            }
-        }
-
-        let (keys, columns) = if let Some((keys, columns)) = keys {
-            if select.iter().all(|c| columns.contains(c)) {
-                // if all columns to select are already present, return the stream
-                (keys, columns)
-            } else {
-                // otherwise, construct a stream of rows by extracting & selecting each primary key
-
-                let index = self.primary.clone();
-                let extract_prefix = prefix_extractor(columns, key_columns);
-
-                let rows = keys
-                    .map_ok(extract_prefix)
-                    .map_ok(move |primary_key| {
-                        let index = index.clone();
-                        async move { index.first(b_tree::Range::from(primary_key)).await }
-                    })
-                    .try_buffered(num_cpus::get())
-                    .map_ok(|maybe_row| maybe_row.expect("row"));
-
-                let rows: Rows<IS::Value> = Box::pin(rows);
-                (rows, self.primary.schema().columns())
-            }
+        // Only physical positions cross the owned stream boundary. No column names
+        // are copied; final extraction retains requested order and repeated columns.
+        let keys: ScopedRows<'s, IS::Value> = index.select(index_range, positions, reverse).await?;
+        let keys: ScopedRows<'s, IS::Value> = if let Some(extract) = extract {
+            Box::pin(keys.map_ok(extract))
         } else {
-            let columns = self.primary.schema().columns();
-            let index_range = index_range_for(columns, &mut range);
-            assert!(range.is_empty());
-            let keys = if reverse {
-                self.primary.clone().keys_rev(index_range).await?
-            } else {
-                self.primary.clone().keys(index_range).await?
-            };
-            (keys, columns)
+            keys
         };
 
-        if columns == select {
+        // Public selection rejects empty columns; internal predicates use them
+        // to consume row presence without copying stored fields.
+        if covering {
             Ok(keys)
         } else {
-            let extract_prefix = prefix_extractor(columns, select);
-            let rows = keys.map_ok(extract_prefix);
-            Ok(Box::pin(rows))
+            let index = primary.clone();
+            let rows = keys
+                .map_ok(move |key| {
+                    let index = index.clone();
+                    async move {
+                        index
+                            .get(&key)
+                            .await
+                            .map_err(freqfs::IntegrityError::from_read)
+                    }
+                })
+                .try_buffered(num_cpus::get())
+                .and_then(|row| {
+                    future::ready(
+                        row.ok_or_else(|| {
+                            freqfs::IntegrityError::invalid_data("missing primary row")
+                        }),
+                    )
+                });
+
+            let columns = primary.schema().columns();
+            if columns == select {
+                Ok(Box::pin(rows))
+            } else {
+                let extract = prefix_extractor(columns, select);
+                Ok(Box::pin(rows.map_ok(extract)))
+            }
         }
     }
 }
@@ -369,8 +249,7 @@ where
             let key = borrow_columns(row, columns, index.schema().columns());
 
             if !index.delete(&key).await? {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(freqfs::IntegrityError::invalid_data(
                     "table index is out of sync",
                 ));
             }
@@ -380,8 +259,7 @@ where
         future::try_join_all(deletes).await?;
 
         if !self.primary.delete(row).await? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(freqfs::IntegrityError::invalid_data(
                 "missing table primary row",
             ));
         }
@@ -389,16 +267,16 @@ where
         Ok(())
     }
 
-    pub(super) async fn delete_range<'a>(
+    pub(super) async fn delete_range(
         &mut self,
-        plan: QueryPlan<'a, IS::Id>,
+        index: IndexId<'_>,
         range: HashMap<IS::Id, ColumnRange<IS::Value>>,
         key_columns: &[IS::Id],
     ) -> Result<usize, io::Error> {
         let mut deleted = 0;
 
         while let Some(row) = self
-            .first(&plan, &range, self.primary.schema().columns(), key_columns)
+            .first(index, &range, self.primary.schema().columns(), key_columns)
             .await?
         {
             self.remove_row(&row).await?;
@@ -406,48 +284,6 @@ where
         }
 
         Ok(deleted)
-    }
-
-    pub(super) async fn delete_all<OG>(
-        &mut self,
-        mut other: TableState<IS, C, OG>,
-    ) -> Result<(), io::Error>
-    where
-        OG: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
-    {
-        let mut deletes = IndexStack::with_capacity(self.auxiliary.len() + 1);
-
-        deletes.push(self.primary.delete_all(other.primary));
-
-        for (name, this) in self.auxiliary.iter_mut() {
-            let that = other.auxiliary.remove(name).expect("other index");
-            deletes.push(this.delete_all(that));
-        }
-
-        future::try_join_all(deletes).await?;
-
-        Ok(())
-    }
-
-    pub(super) async fn merge<OG>(
-        &mut self,
-        mut other: TableState<IS, C, OG>,
-    ) -> Result<(), io::Error>
-    where
-        OG: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
-    {
-        let mut merges = IndexStack::with_capacity(self.auxiliary.len() + 1);
-
-        merges.push(self.primary.merge(other.primary));
-
-        for (name, this) in self.auxiliary.iter_mut() {
-            let that = other.auxiliary.remove(name).expect("other index");
-            merges.push(this.merge(that));
-        }
-
-        future::try_join_all(merges).await?;
-
-        Ok(())
     }
 
     pub(super) async fn upsert(
@@ -473,8 +309,7 @@ where
                             )
                             .await?
                         {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
+                            return Err(freqfs::IntegrityError::invalid_data(
                                 "table index is out of sync",
                             ));
                         }
@@ -483,8 +318,7 @@ where
                     }
 
                     if !index.delete(&old_key).await? {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
+                        return Err(freqfs::IntegrityError::invalid_data(
                             "table index is out of sync",
                         ));
                     }
@@ -499,8 +333,7 @@ where
 
         if let Some(old) = previous {
             if !self.primary.replace(old, row).await? {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(freqfs::IntegrityError::invalid_data(
                     "missing table primary row",
                 ));
             }
@@ -509,36 +342,6 @@ where
         }
 
         Ok(previous.is_none())
-    }
-
-    pub(super) async fn upsert_sorted<R>(&mut self, rows: R) -> Result<u64, io::Error>
-    where
-        R: futures::Stream<Item = Result<Vec<IS::Value>, io::Error>> + Send,
-        IS::Id: Sync,
-    {
-        let columns = self.primary.schema().columns().to_vec();
-        futures::pin_mut!(rows);
-
-        let rows =
-            futures::stream::try_unfold((rows, &mut self.auxiliary), |(mut rows, auxiliary)| {
-                let columns = &columns;
-
-                async move {
-                    let Some(row) = rows.try_next().await? else {
-                        return Ok(None);
-                    };
-
-                    let inserts = auxiliary.values_mut().map(|index| {
-                        let key = clone_columns(&row, columns, index.schema().columns());
-                        index.insert(key)
-                    });
-                    future::try_join_all(inserts).await?;
-
-                    Ok(Some((row, (rows, auxiliary))))
-                }
-            });
-
-        self.primary.insert_sorted(rows).await
     }
 
     pub(super) async fn truncate(&mut self) -> Result<(), io::Error> {

@@ -1,6 +1,294 @@
 use super::*;
 
 #[tokio::test]
+async fn index_names_reject_before_storage_access() -> io::Result<()> {
+    fn schema(case: usize) -> TableSchema {
+        let indices = match case {
+            0 => vec![("aux".into(), vec!["down", "up"])],
+            1 => vec![("primary".into(), vec!["up", "up_name", "down", "down_name"])],
+            2 => vec![
+                ("aux".into(), vec!["down", "up"]),
+                ("aux".into(), vec!["down", "up"]),
+            ],
+            3 => vec![
+                ("aux".into(), vec!["down", "up"]),
+                ("aux".into(), vec!["up", "down"]),
+            ],
+            _ => unreachable!(),
+        };
+        TableSchema::new(vec!["up", "up_name", "down", "down_name"], indices)
+    }
+
+    for case in 1..=3 {
+        let fixture = TestDir::new("invalid_index_names")?;
+        {
+            let cache = Cache::<File>::new(
+                1024 * BLOCK_SIZE,
+                Some(1),
+                0,
+                std::time::Duration::from_secs(3),
+            );
+            let dir = cache.load(fixture.path().to_owned())?;
+            {
+                let held = dir.write().await;
+                let error = TableLock::create(schema(case), Collator::new(), dir.clone())
+                    .now_or_never()
+                    .expect("invalid index names waited for storage")
+                    .err()
+                    .unwrap();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                let error = TableLock::load(schema(case), Collator::new(), dir.clone())
+                    .err()
+                    .unwrap();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                assert!(held.is_empty());
+            }
+            let table = TableLock::create(schema(0), Collator::new(), dir.clone()).await?;
+            table
+                .write()
+                .await
+                .upsert(
+                    vec![1.into()],
+                    vec![
+                        "name".to_string().into(),
+                        2.into(),
+                        "note".to_string().into(),
+                    ],
+                )
+                .await?;
+            table.sync_all().await?;
+            {
+                let held = dir.write().await;
+                let names: Vec<_> = held.names().cloned().collect();
+                let error = TableLock::load(schema(case), Collator::new(), dir.clone())
+                    .err()
+                    .unwrap();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                assert_eq!(held.names().cloned().collect::<Vec<_>>(), names);
+            }
+            drop(table.try_write()?);
+            table.validate().boxed().await?;
+        }
+        {
+            let dir = Cache::<File>::new(
+                1024 * BLOCK_SIZE,
+                Some(1),
+                0,
+                std::time::Duration::from_secs(3),
+            )
+            .load(fixture.path().to_owned())?;
+            let table = TableLock::load(schema(0), Collator::new(), dir)?;
+            table.validate().boxed().await?;
+            assert_eq!(
+                table
+                    .read()
+                    .await
+                    .get_row(&[1.into()])
+                    .await?
+                    .unwrap()
+                    .as_slice(),
+                &[
+                    1.into(),
+                    "name".to_string().into(),
+                    2.into(),
+                    "note".to_string().into()
+                ]
+            );
+        }
+        fixture.close()?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn strict_validation_checks_primary_keys_across_leaves_and_ties() -> io::Result<()> {
+    #[derive(Clone, Eq, PartialEq)]
+    struct TiedNumbers;
+
+    impl Collate for TiedNumbers {
+        type Value = Value;
+
+        fn cmp(&self, left: &Value, right: &Value) -> Ordering {
+            match (left, right) {
+                (Value::Number(_), Value::Number(_)) => Ordering::Equal,
+                _ => Collator::new().cmp(left, right),
+            }
+        }
+    }
+
+    fn schema() -> TableSchema {
+        TableSchema::new(
+            vec!["up", "up_name", "down", "down_name"],
+            [("name".into(), vec!["up_name", "up"])],
+        )
+    }
+
+    for count in [3, 40] {
+        // Both corruption cases have distinct complete rows and consistent auxiliary data.
+        for duplicate in [None, Some(1), Some(count - 1)] {
+            let fixture = TestDir::new("primary_key_validation")?;
+            {
+                let dir = Cache::<File>::new(
+                    1024 * BLOCK_SIZE,
+                    None,
+                    0,
+                    std::time::Duration::from_secs(3),
+                )
+                .load(fixture.path().to_owned())?;
+                let table = TableLock::create(schema(), TiedNumbers, dir.clone()).await?;
+                let primary = dir.read().await.get_dir("primary").unwrap().clone();
+                let primary = b_tree::BTreeLock::load(
+                    table.schema().primary().clone(),
+                    TiedNumbers,
+                    primary,
+                )?;
+                let (name, index_schema) = &table.schema().auxiliary()[0];
+                let auxiliary = dir.read().await.get_dir(name).unwrap().clone();
+                let auxiliary =
+                    b_tree::BTreeLock::load(index_schema.clone(), TiedNumbers, auxiliary)?;
+                for position in 0..count {
+                    let key = if duplicate == Some(position) {
+                        0
+                    } else {
+                        position
+                    };
+                    let name = Value::from(format!("row-{position:04}"));
+                    // Native index writes deliberately bypass Table's unique-key invariant.
+                    primary
+                        .write()
+                        .await
+                        .insert(vec![
+                            key.into(),
+                            name.clone(),
+                            0.into(),
+                            "note".to_string().into(),
+                        ])
+                        .await?;
+                    auxiliary
+                        .write()
+                        .await
+                        .insert(vec![name, key.into()])
+                        .await?;
+                }
+                primary.validate().await?;
+                auxiliary.validate().await?;
+                table.sync_all().await?;
+                if duplicate.is_some() {
+                    let error = table.validate().boxed().await.unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                    assert!(freqfs::IntegrityError::is_marked(&error));
+                } else {
+                    table.validate().boxed().await?;
+                    assert_eq!(
+                        table.read().await.count(Range::default()).await?,
+                        count as u64
+                    );
+                }
+                drop(table.try_write()?);
+            }
+            {
+                let dir = Cache::<File>::new(
+                    1024 * BLOCK_SIZE,
+                    None,
+                    0,
+                    std::time::Duration::from_secs(3),
+                )
+                .load(fixture.path().to_owned())?;
+                let table = TableLock::load(schema(), TiedNumbers, dir)?;
+                if duplicate.is_some() {
+                    let error = table.validate().boxed().await.unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                    assert!(freqfs::IntegrityError::is_marked(&error));
+                } else {
+                    table.validate().boxed().await?;
+                }
+            }
+            fixture.close()?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn index_validation_clones_only_required_fields() -> io::Result<()> {
+    use super::observations::INDEXED_CLONES;
+
+    for selected in [false, true] {
+        let fixture = TestDir::new("validation_projection")?;
+        {
+            let schema = TableSchema::new(
+                vec!["up", "up_name", "down", "down_name"],
+                [(
+                    "aux".into(),
+                    if selected {
+                        vec!["up_name", "up"]
+                    } else {
+                        vec!["down", "up"]
+                    },
+                )],
+            );
+            let cache = Cache::<File>::new(
+                1024 * BLOCK_SIZE,
+                None,
+                0,
+                std::time::Duration::from_secs(3),
+            );
+            let dir = cache.load(fixture.path().to_owned())?;
+            let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+            for key in 0..20 {
+                table
+                    .write()
+                    .await
+                    .upsert(
+                        vec![key.into()],
+                        vec![
+                            "indexed".to_string().into(),
+                            (key + 100).into(),
+                            "note".to_string().into(),
+                        ],
+                    )
+                    .await?;
+            }
+
+            INDEXED_CLONES
+                .scope(std::cell::Cell::new(0), async {
+                    // Strict schema validation owns its input rows. Measure those
+                    // required clones separately from the cross-index consistency pass.
+                    let primary = dir.read().await.get_dir("primary").unwrap().clone();
+                    b_tree::BTreeLock::load(
+                        table.schema().primary().clone(),
+                        Collator::new(),
+                        primary,
+                    )?
+                    .validate()
+                    .await?;
+                    for (name, schema) in table.schema().auxiliary() {
+                        let native = dir.read().await.get_dir(name).unwrap().clone();
+                        b_tree::BTreeLock::load(schema.clone(), Collator::new(), native)?
+                            .validate()
+                            .await?;
+                    }
+                    let strict_clones = INDEXED_CLONES.with(std::cell::Cell::get);
+                    INDEXED_CLONES.with(|count| count.set(0));
+
+                    // One owned primary scan; only an index which selects the marker
+                    // needs another copy. Auxiliary cardinality scans borrow their rows.
+                    table.validate().boxed().await?;
+                    assert_eq!(
+                        INDEXED_CLONES.with(std::cell::Cell::get),
+                        strict_clones + 20 * if selected { 2 } else { 1 }
+                    );
+                    Ok::<_, io::Error>(())
+                })
+                .await?;
+            table.sync_all().await?;
+        }
+        fixture.close()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn variable_width_separators_rebalance_and_reopen() -> Result<(), io::Error> {
     let fixture = TestDir::new("test_table")?;
     let path = fixture.path().to_owned();
@@ -86,7 +374,7 @@ async fn cancelled_index_construction_is_not_loadable() -> io::Result<()> {
         let filler = root
             .write()
             .await
-            .create_empty_file("pinned".into(), File::Node(Node::Leaf(vec![])))
+            .create_file("pinned".into(), File::Node(Node::Leaf(vec![])))
             .await?;
         let pinned = filler.read::<Node<Value>>().await?;
         let dir = root.write().await.create_dir("table".into())?;
@@ -151,43 +439,31 @@ async fn in_place_indexes_reopen_and_reject_inconsistency() -> io::Result<()> {
     }
 
     async fn ingest(table: &TableLock<TableSchema, IndexSchema, Collator, File>) -> io::Result<()> {
-        let rows = futures::stream::iter((0..40).flat_map(|key| {
-            let row = (
-                vec![key.into()],
-                vec![
-                    "up".to_string().into(),
-                    key.into(),
-                    "down".to_string().into(),
-                ],
-            );
-            [Ok(row.clone()), Ok(row)]
-        }));
-        assert_eq!(table.write().await.upsert_sorted(rows).await?, 40);
-        let rows = futures::stream::iter([
-            Ok((
-                vec![40.into()],
-                vec![
-                    "up".to_string().into(),
-                    40.into(),
-                    "down".to_string().into(),
-                ],
-            )),
-            Err(io::Error::other("injected source error")),
-        ]);
-        assert!(table.write().await.upsert_sorted(rows).await.is_err());
-        assert!(table.read().await.get_row(&[40.into()]).await?.is_some());
-        let invalid = futures::stream::iter([Ok((vec![41.into()], vec![]))]);
-        assert_eq!(
-            table
-                .write()
-                .await
-                .upsert_sorted(invalid)
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
+        let mut writer = table.write().await;
+        for key in 0..40 {
+            let row = vec![
+                "up".to_string().into(),
+                key.into(),
+                "down".to_string().into(),
+            ];
+            assert!(writer.upsert(vec![key.into()], row.clone()).await?);
+            assert!(!writer.upsert(vec![key.into()], row).await?);
+        }
+        assert!(
+            writer
+                .upsert(
+                    vec![40.into()],
+                    vec![
+                        "up".to_string().into(),
+                        40.into(),
+                        "down".to_string().into(),
+                    ]
+                )
+                .await?
         );
-        assert!(table.read().await.get_row(&[41.into()]).await?.is_none());
+        let error = writer.upsert(vec![41.into()], vec![]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(writer.get_row(&[41.into()]).await?.is_none());
         Ok(())
     }
 
@@ -280,13 +556,13 @@ async fn in_place_indexes_reopen_and_reject_inconsistency() -> io::Result<()> {
         *auxiliary
             .write()
             .await
-            .write_file::<_, Node<Value>>(&name)
+            .write_file::<Node<Value>>(&name)
             .await? = Node::Leaf(vec![]);
         assert!(table.validate().await.is_err());
         *auxiliary
             .write()
             .await
-            .write_file::<_, Node<Value>>("00000000-0000-0000-0000-000000000000")
+            .write_file::<Node<Value>>("00000000-0000-0000-0000-000000000000")
             .await? = Node::Leaf(vec![]);
         // Native mutation fails structurally on a missing old auxiliary entry.
         assert!(

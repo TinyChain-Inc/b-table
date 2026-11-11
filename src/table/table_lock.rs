@@ -1,16 +1,20 @@
-use std::collections::{BTreeMap, HashMap};
-use std::io;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+    ops::ControlFlow,
+    sync::Arc,
+};
 
 use b_tree::BTreeLock;
+use b_tree::collate::CollateRef;
 use freqfs::{DirLock, FileLoad, FileSave};
 use safecast::AsType;
 
 use super::table_state::TableState;
 use super::table_utils::valid_schema;
 use super::{PRIMARY, Table, TableReadGuard, TableWriteGuard};
-use crate::Node;
 use crate::schema::{Schema, TableSchema};
+use crate::{IndexStack, Node, Row};
 
 /// A futures-aware read-write lock on a [`Table`]
 pub struct TableLock<S, IS, C, FE> {
@@ -99,7 +103,7 @@ where
 
         let primary = {
             let dir = dir_contents.get_dir(PRIMARY).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "missing Table primary index")
+                freqfs::IntegrityError::invalid_data("missing Table primary index")
             })?;
             BTreeLock::load(schema.primary().clone(), collator.clone(), dir.clone())
         }?;
@@ -108,7 +112,7 @@ where
         for (name, schema) in schema.auxiliary() {
             let index = {
                 let dir = dir_contents.get_dir(name).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "missing Table auxiliary index")
+                    freqfs::IntegrityError::invalid_data("missing Table auxiliary index")
                 })?;
                 BTreeLock::load(schema.clone(), collator.clone(), dir.clone())
             }?;
@@ -158,6 +162,7 @@ where
         for index in self.auxiliary.values() {
             index.validate().await?;
         }
+
         self.validate_indexes().await
     }
 
@@ -165,10 +170,12 @@ where
     where
         S::Value: Default,
     {
-        use crate::IndexSchema;
         use futures::TryStreamExt;
 
-        let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+        use crate::IndexSchema;
+
+        let invalid = |message| freqfs::IntegrityError::invalid_data(message);
+
         {
             let dir = self.dir.read().await;
             if dir.len() != self.auxiliary.len() + 1
@@ -180,33 +187,84 @@ where
                 return Err(invalid("invalid Table index directories"));
             }
         }
-        let mut rows = self
-            .primary
-            .read()
-            .await
+
+        let columns = self.primary.schema().columns();
+        let projections: Vec<_> = self
+            .auxiliary
+            .values()
+            .map(|index| {
+                let positions: IndexStack<_> = index
+                    .schema()
+                    .columns()
+                    .iter()
+                    .map(|column| {
+                        columns
+                            .iter()
+                            .position(|stored| stored == column)
+                            .expect("column")
+                    })
+                    .collect();
+                (index, positions)
+            })
+            .collect();
+
+        let primary = self.primary.read().await;
+        let mut rows = primary
+            .clone()
             .keys(b_tree::Range::<S::Value>::default())
             .await?;
+        let key_len = self.schema.key().len();
+        let mut previous: Option<Row<S::Value>> = None;
         let mut count = 0;
-        while let Some(row) = rows.try_next().await? {
+        while let Some(mut row) = rows.try_next().await? {
+            let key = row
+                .get(..key_len)
+                .ok_or_else(|| invalid("invalid Table primary key width"))?;
+            if let Some(previous) = &previous {
+                if previous.as_slice() == key {
+                    return Err(invalid("ambiguous Table primary key"));
+                }
+
+                // Distinct semantic keys can share a collation group. Resolve
+                // only those ties, using the capability already held by the scan.
+                if self
+                    .primary
+                    .collator()
+                    .cmp_ref(previous.as_slice(), key)
+                    .is_eq()
+                {
+                    primary
+                        .get_with(key, |_| Ok::<_, io::Error>(()))
+                        .await
+                        .map_err(freqfs::IntegrityError::from_read)?
+                        .ok_or_else(|| invalid("missing Table primary row"))?;
+                }
+            }
+
             count += 1;
-            for index in self.auxiliary.values() {
-                let key = super::table_utils::extract_columns(
-                    row.clone(),
-                    self.primary.schema().columns(),
-                    index.schema().columns(),
-                );
+            for (index, positions) in &projections {
+                let key: Row<_> = positions
+                    .iter()
+                    .map(|&position| row[position].clone())
+                    .collect();
                 if !index.read().await.contains(&key).await? {
                     return Err(invalid("inconsistent Table index"));
                 }
             }
+
+            row.truncate(key_len);
+            previous = Some(row);
         }
+
         for index in self.auxiliary.values() {
-            let actual = index
+            let mut actual = 0_u64;
+            index
                 .read()
                 .await
-                .keys(b_tree::Range::<S::Value>::default())
-                .await?
-                .try_fold(0_u64, |count, _| futures::future::ready(Ok(count + 1)))
+                .visit(b_tree::Range::<S::Value>::default(), false, |_| {
+                    actual += 1;
+                    Ok::<_, io::Error>(ControlFlow::Continue(()))
+                })
                 .await?;
             if actual != count {
                 return Err(invalid("inconsistent Table index count"));
@@ -229,6 +287,7 @@ where
                     "copy requires empty storage",
                 ));
             }
+
             let primary = contents.create_dir(PRIMARY.to_string())?;
             let targets = self
                 .auxiliary
@@ -241,6 +300,7 @@ where
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
             (primary, targets)
         };
+
         let primary = self.primary.copy_into(primary).await?;
         let mut auxiliary = BTreeMap::new();
         for (name, target) in targets {
