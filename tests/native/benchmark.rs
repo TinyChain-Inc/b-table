@@ -40,18 +40,13 @@ async fn benchmark_index_mutations() -> io::Result<()> {
                 );
             };
 
-            let start = std::time::Instant::now();
-            assert_eq!(
-                table
-                    .write()
-                    .await
-                    .upsert_sorted(futures::stream::iter(
-                        (0..128).map(|key| Ok((vec![key.into()], values("initial")))),
-                    ))
-                    .await?,
-                128
-            );
-            emit("ordered_insert", "new", start.elapsed());
+            // Setup is outside operation timings; ordered ingestion is no longer a capability.
+            {
+                let mut writer = table.write().await;
+                for key in 0..128 {
+                    assert!(writer.upsert(vec![key.into()], values("initial")).await?);
+                }
+            }
             table.validate().await?;
 
             let start = std::time::Instant::now();
@@ -108,13 +103,12 @@ async fn benchmark_index_mutations() -> io::Result<()> {
             emit("delete", "resident", start.elapsed());
             table.validate().await?;
 
-            table
-                .write()
-                .await
-                .upsert_sorted(futures::stream::iter(
-                    (0..128).map(|key| Ok((vec![key.into()], values("range")))),
-                ))
-                .await?;
+            {
+                let mut writer = table.write().await;
+                for key in 0..128 {
+                    assert!(writer.upsert(vec![key.into()], values("range")).await?);
+                }
+            }
             let start = std::time::Instant::now();
             assert_eq!(
                 table.write().await.delete_range(Range::default()).await?,

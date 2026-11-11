@@ -1,7 +1,7 @@
-use std::cmp::Ordering;
-use std::io;
-use std::ops::Bound;
+use std::{cmp::Ordering, io, ops::Bound};
 
+use b_table::collate::Collate;
+use b_table::{Node, Range, Schema, TableLock};
 use freqfs::Cache;
 use futures::{FutureExt, TryStreamExt};
 use get_size::GetSize;
@@ -10,8 +10,6 @@ use number_general::NumberCollator;
 use self::adapters::{BLOCK_SIZE, Collator, File, IndexSchema, TableSchema, Value};
 use self::directory::TestDir;
 use self::observations::INDEXED_CLONES;
-use b_table::collate::Collate;
-use b_table::{Node, Range, TableLock};
 
 #[path = "../examples/support/adapters.rs"]
 mod adapters;
