@@ -4,9 +4,11 @@
 re-exported from `b-tree`. It owns range collation and optional storage refinement;
 `ordering()` borrows this immutable configuration. Use `.range_collator()` for
 prefixes and ranges and `.key_collator()` for complete stored keys. Each native
-index retains that configuration; `row_collator` delegates borrowed selected-index
-columns to the key comparator before applying reverse traversal. Refinement
-applies only after every range column and key length ties, preserving range groups.
+index retains that configuration. `rows` returns full primary rows and their
+comparator from one index selection. The comparator delegates borrowed
+selected-index columns to the key comparator before applying reverse traversal.
+Refinement applies only after every range column and key length ties, preserving
+range groups.
 
 A persistent database table based on
 [b-tree](https://github.com/TinyChain-Inc/b-tree), with support for multiple indices.
@@ -85,9 +87,12 @@ primary-key equality within the collation group; multiple matching rows are an
 ambiguity error before mutation.
 
 Auxiliary differences are applied first; interrupted or failed replacement
-can leave partial index changes. The caller owns recovery. `row_collator` returns
-comparison behavior for complete primary rows in the supporting index's storage
-order, using the same index-selection rule as row iteration.
+can leave partial index changes. The caller owns recovery. `rows` pairs a full-row
+stream with its supporting index's storage-order comparator.
+Both retain their own metadata after the Table guard is released; the comparator
+accepts complete schema-width primary rows. Projected scans use
+`select(range, order, reverse, columns)`; an explicit column selection avoids
+constructing a full-row comparator.
 
 First-row reads and retained row streams share selected-index execution. Scoped
 reads borrow only the selected and primary indexes instead of rebuilding the

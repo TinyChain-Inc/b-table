@@ -1,6 +1,94 @@
 use super::*;
 
 #[tokio::test]
+async fn paired_rows_and_collator_share_index_order_after_guard_release() -> io::Result<()> {
+    let fixture = TestDir::new("paired_rows")?;
+    let cache = Cache::<File>::new(
+        1024 * BLOCK_SIZE,
+        None,
+        0,
+        std::time::Duration::from_secs(3),
+    );
+
+    let table = TableLock::create(
+        TableSchema::new(
+            vec!["up", "up_name", "down", "down_name"],
+            [("down".into(), vec!["down", "up"])],
+        ),
+        b_tree::IndexOrder::new(Collator::new()),
+        cache.load(fixture.path().to_owned())?,
+    )
+    .await?;
+
+    for (key, down) in [(1, 30), (2, 10), (3, 20)] {
+        table
+            .write()
+            .await
+            .upsert(
+                vec![key.into()],
+                vec![
+                    "up".to_owned().into(),
+                    down.into(),
+                    "down".to_owned().into(),
+                ],
+            )
+            .await?;
+    }
+
+    for (order, expected) in [
+        (vec![], vec![1, 2, 3]),
+        (vec!["down".to_owned()], vec![2, 3, 1]),
+    ] {
+        for reverse in [false, true] {
+            let (rows, collator) = {
+                let native = table.read().await;
+                native.rows(Range::default(), &order, reverse).await?
+            };
+
+            let rows: Vec<_> = rows.try_collect().await?;
+            let mut expected = expected.clone();
+            if reverse {
+                expected.reverse();
+            }
+
+            assert_eq!(rows.len(), expected.len());
+            for (row, key) in rows.iter().zip(expected) {
+                assert_eq!(row[0], Value::from(key));
+                assert_eq!(row.len(), 4);
+            }
+
+            assert!(
+                rows.windows(2)
+                    .all(|pair| collator.cmp(&pair[0], &pair[1]).is_lt())
+            );
+
+            // Retaining the comparator must not retain a native storage guard.
+            {
+                let _write = tokio::time::timeout(std::time::Duration::from_secs(1), table.write())
+                    .await
+                    .expect("collator retained a storage guard");
+            }
+
+            assert!(collator.cmp(&rows[0], &rows[1]).is_lt());
+        }
+    }
+
+    assert_eq!(
+        table
+            .read()
+            .await
+            .rows(Range::default(), &["down_name".to_owned()], false)
+            .await
+            .err()
+            .expect("unsupported ordering")
+            .kind(),
+        io::ErrorKind::Unsupported
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_schema_rejects_before_native_allocation_or_loading() -> io::Result<()> {
     let schemas = [
         TableSchema::new(vec!["id", "id", "count", "other"], []),

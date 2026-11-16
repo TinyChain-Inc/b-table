@@ -77,51 +77,6 @@ where
         }
     }
 
-    /// Compare full primary rows in the complete supporting index's storage order.
-    /// The index is selected by the same rule as `rows`, independently of projection.
-    /// Callers must supply complete schema-width rows to the infallible comparator.
-    pub fn row_collator(
-        &self,
-        range: &Range<S::Id, S::Value>,
-        order: &[S::Id],
-        reverse: bool,
-    ) -> Result<RowCollator<C, O>, io::Error>
-    where
-        C: Clone,
-        O: Clone,
-    {
-        let index = match self.schema.query_index(range.inner(), order)? {
-            crate::IndexId::Primary => self.schema.primary(),
-            crate::IndexId::Auxiliary(name) => {
-                &self
-                    .schema
-                    .auxiliary()
-                    .iter()
-                    .find(|(candidate, _)| candidate == name)
-                    .expect("selected index")
-                    .1
-            }
-        };
-
-        let columns = self.schema.primary().columns();
-        let indices = index
-            .columns()
-            .iter()
-            .map(|column| {
-                columns
-                    .iter()
-                    .position(|candidate| candidate == column)
-                    .expect("schema column")
-            })
-            .collect();
-
-        Ok(RowCollator::new(
-            indices,
-            self.state.primary.ordering().clone(),
-            reverse,
-        ))
-    }
-
     /// Return the first row in the given `range` using the given `order`.
     pub async fn first(
         &self,
@@ -197,43 +152,54 @@ where
         self.state.is_empty(index, range, self.schema.key()).await
     }
 
-    /// Construct a [`Stream`] of the `select`ed columns of the [`Rows`] within the given `range`.
+    /// Return full primary rows together with their storage-order comparator.
+    /// One index selection determines both the stream and its comparator,
+    /// including reverse traversal. The comparator accepts complete schema-width
+    /// rows and owns its metadata independently of this Table guard.
+    pub async fn rows(
+        &self,
+        range: Range<S::Id, S::Value>,
+        order: &[S::Id],
+        reverse: bool,
+    ) -> Result<(Rows<S::Value>, RowCollator<C, O>), io::Error> {
+        let range = range.into_inner();
+        let index = self.schema.query_index(&range, order)?;
+        self.state
+            .rows(index, range, reverse, self.schema.key())
+            .await
+    }
+
+    /// Construct a [`Stream`] of the requested columns of the [`Rows`] within the given `range`.
     ///
     /// One index must support every constraint and the literal ordering prefix.
     /// Constraints are leading equalities followed by at most one range.
     /// Unsupported combinations return [`io::ErrorKind::Unsupported`] before traversal.
-    pub async fn rows<'a>(
-        &'a self,
+    pub async fn select(
+        &self,
         range: Range<S::Id, S::Value>,
-        order: &'a [S::Id],
+        order: &[S::Id],
         reverse: bool,
-        select: Option<&'a [S::Id]>,
+        columns: &[S::Id],
     ) -> Result<Rows<S::Value>, io::Error> {
         #[cfg(feature = "logging")]
-        log::debug!("Table::rows with order {order:?}");
+        log::debug!("Table::select with order {order:?}");
 
         let range = range.into_inner();
-        let select = select.unwrap_or(self.schema.primary().columns());
         let index = self.schema.query_index(&range, order)?;
-        if select.is_empty()
-            || select
+        if columns.is_empty()
+            || columns
                 .iter()
                 .any(|column| !self.schema.primary().columns().contains(column))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid column selection: {select:?}"),
+                format!("invalid column selection: {columns:?}"),
             ));
         }
 
         self.state
-            .rows(index, range, reverse, select, self.schema.key())
+            .select(index, range, reverse, columns, self.schema.key())
             .await
-    }
-
-    /// Consume this [`TableReadGuard`] to construct a [`Stream`] of all the rows in the [`Table`].
-    pub async fn into_rows(self) -> Result<Rows<S::Value>, io::Error> {
-        self.rows(Range::default(), &[], false, None).await
     }
 }
 

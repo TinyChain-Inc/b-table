@@ -129,8 +129,9 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
     {
         let read = table.read().await;
         assert!(
-            read.rows(range.clone(), &[], false, None)
+            read.rows(range.clone(), &[], false)
                 .await?
+                .0
                 .try_next()
                 .await?
                 .is_none()
@@ -172,7 +173,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
             }
         };
         for reverse in [false, true] {
-            let mut rows = read.rows(supported.clone(), &order, reverse, None).await?;
+            let mut rows = read.rows(supported.clone(), &order, reverse).await?.0;
             let expected = if reverse { [2, 1] } else { [1, 2] };
             for key in expected {
                 assert_eq!(
@@ -200,7 +201,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         for rejected in [multi, counted] {
             for reverse in [false, true] {
                 assert_eq!(
-                    read.rows(rejected.clone(), &[], reverse, None)
+                    read.rows(rejected.clone(), &[], reverse)
                         .await
                         .err()
                         .unwrap()
@@ -226,7 +227,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         }
         for select in [vec![], vec!["missing".to_string()]] {
             assert_eq!(
-                read.rows(supported.clone(), &["up".into()], false, Some(&select))
+                read.select(supported.clone(), &["up".into()], false, &select)
                     .await
                     .err()
                     .unwrap()
@@ -242,7 +243,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
             );
         }
         assert_eq!(
-            read.rows(supported, &["up".into()], false, None)
+            read.rows(supported, &["up".into()], false)
                 .await
                 .err()
                 .unwrap()
@@ -274,7 +275,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
     assert_eq!(table.read().await.count(Range::default()).await?, 2);
     {
         let read = table.read().await;
-        let mut rows = read.rows(Range::default(), &[], false, None).await?;
+        let mut rows = read.rows(Range::default(), &[], false).await?.0;
         drop(read);
         assert!(rows.try_next().await?.is_some());
         drop(rows);
@@ -458,7 +459,12 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
             cache.load(path.clone())?,
         )?;
         table.validate().await?;
-        let mut rows = table.read().await.into_rows().await?;
+        let mut rows = table
+            .read()
+            .await
+            .rows(Range::default(), &[], false)
+            .await?
+            .0;
         assert!(table.try_write().is_err());
         let mut actual = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -552,8 +558,9 @@ async fn equivalent_primary_keys_remain_distinct_and_relocate_consistently() -> 
             let read = table.read().await;
             for reverse in [false, true] {
                 let rows = read
-                    .rows(range.clone(), &[], reverse, None)
+                    .rows(range.clone(), &[], reverse)
                     .await?
+                    .0
                     .try_collect::<Vec<_>>()
                     .await?;
                 assert_eq!(rows.len(), 1);
@@ -713,7 +720,7 @@ async fn ambiguous_primary_keys_fail_before_auxiliary_changes() -> io::Result<()
         )]);
         for reverse in [false, true] {
             let reader = table.read().await;
-            let mut rows = reader.rows(range.clone(), &[], reverse, None).await?;
+            let mut rows = reader.rows(range.clone(), &[], reverse).await?.0;
             let error = rows.try_next().await.unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert!(freqfs::IntegrityError::is_marked(&error));
@@ -814,7 +821,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 );
                 assert!(
                     reader
-                        .rows(Range::default(), &[], false, Some(&[]))
+                        .select(Range::default(), &[], false, &[])
                         .await
                         .is_err()
                 );
@@ -873,7 +880,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                         let selection = ["down".to_string(), "up".to_string(), "up".to_string()];
                         let reader = table.read().await;
                         let mut rows = reader
-                            .rows(Range::default(), &order, reverse, Some(&selection))
+                            .select(Range::default(), &order, reverse, &selection)
                             .await?;
                         let mut expected: Vec<_> = (0..20).collect();
                         if reverse {
@@ -893,7 +900,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let reader = table.read().await;
                 let selection = ["up".to_string()];
                 let mut rows = reader
-                    .rows(Range::default(), &[], false, Some(&selection))
+                    .select(Range::default(), &[], false, &selection)
                     .await?;
                 assert_eq!(rows.try_next().await?.unwrap().as_slice(), &[0.into()]);
                 drop(reader);
@@ -916,7 +923,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                         ];
                         INDEXED_CLONES.with(|count| count.set(0));
                         let mut rows = reader
-                            .rows(Range::default(), &order, reverse, Some(&selection))
+                            .select(Range::default(), &order, reverse, &selection)
                             .await?;
                         let mut expected: Vec<_> = (0..20).collect();
                         if reverse {
@@ -941,7 +948,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
 
                 for selection in [vec![], vec!["missing".to_string()]] {
                     let error = reader
-                        .rows(Range::default(), &[], false, Some(&selection))
+                        .select(Range::default(), &[], false, &selection)
                         .await
                         .err()
                         .expect("invalid column selection");
@@ -955,7 +962,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 )]);
                 assert_eq!(
                     reader
-                        .rows(range.clone(), &["up".into()], false, None)
+                        .rows(range.clone(), &["up".into()], false)
                         .await
                         .err()
                         .unwrap()
@@ -963,7 +970,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                     io::ErrorKind::Unsupported
                 );
                 let order = ["up_name".into(), "up".into()];
-                let mut owned = reader.rows(range, &order, false, None).await?;
+                let mut owned = reader.rows(range, &order, false).await?.0;
                 let mut expected = Vec::new();
                 while let Some(row) = owned.try_next().await? {
                     expected.push(row[0].clone());
@@ -982,7 +989,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let blocked = root.write::<Node<Value>>().await?;
                 let reader = table.read().await;
                 let mut visiting = Box::pin(async {
-                    let mut rows = reader.rows(Range::default(), &[], false, None).await?;
+                    let mut rows = reader.rows(Range::default(), &[], false).await?.0;
                     rows.try_next().await
                 });
                 assert!(futures::poll!(&mut visiting).is_pending());
@@ -993,7 +1000,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 drop(table.try_write()?);
 
                 let reader = table.read().await;
-                drop(reader.rows(Range::default(), &[], false, None));
+                drop(reader.rows(Range::default(), &[], false));
                 drop(reader);
                 drop(table.try_write()?);
 
@@ -1007,7 +1014,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let columns = ["up", "up_name", "down", "down_name"].map(str::to_string);
                 let reader = table.read().await;
                 for reverse in [false, true] {
-                    let mut rows = reader.rows(range.clone(), &order, reverse, None).await?;
+                    let mut rows = reader.rows(range.clone(), &order, reverse).await?.0;
                     assert_eq!(
                         rows.try_next().await.unwrap_err().kind(),
                         io::ErrorKind::InvalidData
@@ -1024,7 +1031,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 for select in [vec![], vec!["absent".to_string()]] {
                     assert_eq!(
                         reader
-                            .rows(Range::default(), &[], false, Some(&select))
+                            .select(Range::default(), &[], false, &select)
                             .await
                             .err()
                             .unwrap()
@@ -1072,15 +1079,15 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                     let reader = table.read().await;
                     assert_eq!(
                         reader
-                            .rows(range.clone(), &order, reverse, None)
+                            .rows(range.clone(), &order, reverse)
                             .await
                             .err()
                             .unwrap()
                             .kind(),
                         io::ErrorKind::Unsupported
                     );
-                    let error = match reader.rows(Range::default(), &order, reverse, None).await {
-                        Ok(mut rows) => rows.try_next().await.unwrap_err(),
+                    let error = match reader.rows(Range::default(), &order, reverse).await {
+                        Ok((mut rows, _)) => rows.try_next().await.unwrap_err(),
                         Err(error) => error,
                     };
                     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -1152,7 +1159,7 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
         let read = table.read().await;
         for reverse in [false, true] {
             assert_eq!(
-                read.rows(range.clone(), &[], reverse, None)
+                read.rows(range.clone(), &[], reverse)
                     .await
                     .err()
                     .unwrap()
@@ -1160,8 +1167,9 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
                 io::ErrorKind::Unsupported
             );
             let rows = read
-                .rows(supported.clone(), &["b".into(), "a".into()], reverse, None)
-                .await?;
+                .rows(supported.clone(), &["b".into(), "a".into()], reverse)
+                .await?
+                .0;
             let owned: Vec<_> = rows.map_ok(|row| row.into_vec()).try_collect().await?;
             let mut expected: Vec<Vec<Value>> = vec![
                 vec![1.into(), 0.into(), 1.into(), 2.into()],
@@ -1211,8 +1219,9 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
         let actual: Vec<_> = table
             .read()
             .await
-            .rows(Range::default(), &[], false, None)
+            .rows(Range::default(), &[], false)
             .await?
+            .0
             .map_ok(|row| row.into_vec())
             .try_collect()
             .await?;

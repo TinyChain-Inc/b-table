@@ -145,7 +145,7 @@ async fn main() -> Result<(), io::Error> {
         // test reading a stream of all rows
         {
             let guard = table.read().await;
-            let mut stream = guard.rows(Range::default(), &[], false, None).await?;
+            let (mut stream, _) = guard.rows(Range::default(), &[], false).await?;
 
             assert_eq!(
                 stream.try_next().await?,
@@ -162,7 +162,7 @@ async fn main() -> Result<(), io::Error> {
                 (Bound::Unbounded, Bound::Excluded(10.into())),
             )]);
 
-            let mut stream = guard.rows(range, &[], true, None).await?;
+            let (mut stream, _) = guard.rows(range, &[], true).await?;
 
             assert_eq!(
                 stream.try_next().await?,

@@ -64,7 +64,12 @@ async fn benchmark_index_mutations() -> io::Result<()> {
 
             let start = std::time::Instant::now();
             {
-                let mut rows = table.read().await.into_rows().await?;
+                let mut rows = table
+                    .read()
+                    .await
+                    .rows(Range::default(), &[], false)
+                    .await?
+                    .0;
                 let mut count = 0;
                 while let Some(row) = rows.try_next().await? {
                     std::hint::black_box(row);

@@ -9,7 +9,7 @@ use safecast::AsType;
 
 use super::table_utils::{borrow_columns, index_range_for, prefix_extractor};
 use crate::schema::{IndexId, IndexSchema, Range};
-use crate::{ColumnRange, IndexStack, Node, Row};
+use crate::{ColumnRange, IndexStack, Node, Row, RowCollator};
 
 type ScopedRows<'a, V> =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<Row<V>, io::Error>> + Send + 'a>>;
@@ -104,7 +104,7 @@ where
     ) -> Result<u64, io::Error> {
         // Zero-field projection retains scan ordering and validation without
         // cloning values that this predicate would immediately discard.
-        let mut rows = self.rows(index, range, false, &[], key_columns).await?;
+        let mut rows = self.select(index, range, false, &[], key_columns).await?;
 
         let mut count = 0;
         while let Some(_row) = rows.try_next().await? {
@@ -120,11 +120,11 @@ where
         range: HashMap<IS::Id, ColumnRange<IS::Value>>,
         key_columns: &'a [IS::Id],
     ) -> Result<bool, io::Error> {
-        let mut rows = self.rows(index, range, false, &[], key_columns).await?;
+        let mut rows = self.select(index, range, false, &[], key_columns).await?;
         rows.try_next().await.map(|row| row.is_none())
     }
 
-    pub(super) async fn rows<'s>(
+    pub(super) async fn select<'s>(
         &self,
         index: IndexId<'_>,
         range: HashMap<IS::Id, ColumnRange<IS::Value>>,
@@ -145,6 +145,44 @@ where
             key_columns,
         )
         .await
+    }
+
+    pub(super) async fn rows<'s>(
+        &self,
+        index: IndexId<'_>,
+        range: HashMap<IS::Id, ColumnRange<IS::Value>>,
+        reverse: bool,
+        key_columns: &[IS::Id],
+    ) -> Result<(ScopedRows<'s, IS::Value>, RowCollator<C, O>), io::Error>
+    where
+        G: 's,
+    {
+        let index = self.get_index(index).expect("selected schema index");
+        let columns = self.primary.schema().columns();
+        let positions = index
+            .schema()
+            .columns()
+            .iter()
+            .map(|column| {
+                columns
+                    .iter()
+                    .position(|candidate| candidate == column)
+                    .expect("schema column")
+            })
+            .collect();
+
+        let collator = RowCollator::new(positions, index.ordering().clone(), reverse);
+        let rows = Self::index_rows(
+            &self.primary,
+            index.clone(),
+            range,
+            reverse,
+            columns,
+            key_columns,
+        )
+        .await?;
+
+        Ok((rows, collator))
     }
 
     async fn index_rows<'s>(
