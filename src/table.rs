@@ -12,10 +12,12 @@ use self::table_utils::bad_key;
 use super::Node;
 use super::schema::{IndexSchema, Range, Schema, TableSchema};
 
+mod order;
 mod table_lock;
 mod table_state;
-mod table_utils;
+pub(crate) mod table_utils;
 
+pub use order::RowCollator;
 pub use table_lock::TableLock;
 
 const PRIMARY: &str = "primary";
@@ -24,10 +26,10 @@ const PRIMARY: &str = "primary";
 pub const ROW_STACK_SIZE: usize = 32;
 
 /// A read guard acquired on a [`TableLock`]
-pub type TableReadGuard<S, IS, C, FE> = Table<S, IS, C, Arc<DirReadGuardOwned<FE>>>;
+pub type TableReadGuard<S, IS, C, FE, O = C> = Table<S, IS, C, Arc<DirReadGuardOwned<FE>>, O>;
 
 /// A write guard acquired on a [`TableLock`]
-pub type TableWriteGuard<S, IS, C, FE> = Table<S, IS, C, DirWriteGuardOwned<FE>>;
+pub type TableWriteGuard<S, IS, C, FE, O = C> = Table<S, IS, C, DirWriteGuardOwned<FE>, O>;
 
 /// The type of row returned in a [`Stream`] of [`Rows`]
 pub type Row<V> = SmallVec<[V; ROW_STACK_SIZE]>;
@@ -36,14 +38,15 @@ pub type Row<V> = SmallVec<[V; ROW_STACK_SIZE]>;
 pub type Rows<V> = Pin<Box<dyn Stream<Item = Result<Row<V>, io::Error>> + Send>>;
 
 /// A database table with support for multiple indices
-pub struct Table<S, IS, C, G> {
+pub struct Table<S, IS, C, G, O = C> {
     schema: Arc<TableSchema<S>>,
-    state: TableState<IS, C, G>,
+    state: TableState<IS, C, G, O>,
 }
 
-impl<S, IS, C, G> Clone for Table<S, IS, C, G>
+impl<S, IS, C, G, O> Clone for Table<S, IS, C, G, O>
 where
     C: Clone,
+    O: Clone,
     G: Clone,
 {
     fn clone(&self) -> Self {
@@ -54,10 +57,11 @@ where
     }
 }
 
-impl<S, C, FE, G> Table<S, S::Index, C, G>
+impl<S, C, FE, G, O> Table<S, S::Index, C, G, O>
 where
     S: Schema,
     C: Collate<Value = S::Value> + 'static,
+    O: Collate<Value = S::Value> + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + 'static,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -82,6 +86,7 @@ where
     ) -> Result<Option<Row<S::Value>>, io::Error>
     where
         C: Clone + Send + Sync,
+        O: Clone + Send + Sync,
         G: Sync,
     {
         let range = range.into_inner();
@@ -124,10 +129,11 @@ where
     }
 }
 
-impl<S, C, FE, G> Table<S, S::Index, C, G>
+impl<S, C, FE, G, O> Table<S, S::Index, C, G, O>
 where
     S: Schema,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
+    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -146,55 +152,66 @@ where
         self.state.is_empty(index, range, self.schema.key()).await
     }
 
-    /// Construct a [`Stream`] of the `select`ed columns of the [`Rows`] within the given `range`.
+    /// Return full primary rows together with their storage-order comparator.
+    /// One index selection determines both the stream and its comparator,
+    /// including reverse traversal. The comparator accepts complete schema-width
+    /// rows and owns its metadata independently of this Table guard.
+    pub async fn rows(
+        &self,
+        range: Range<S::Id, S::Value>,
+        order: &[S::Id],
+        reverse: bool,
+    ) -> Result<(Rows<S::Value>, RowCollator<C, O>), io::Error> {
+        let range = range.into_inner();
+        let index = self.schema.query_index(&range, order)?;
+        self.state
+            .rows(index, range, reverse, self.schema.key())
+            .await
+    }
+
+    /// Construct a [`Stream`] of the requested columns of the [`Rows`] within the given `range`.
     ///
     /// One index must support every constraint and the literal ordering prefix.
     /// Constraints are leading equalities followed by at most one range.
     /// Unsupported combinations return [`io::ErrorKind::Unsupported`] before traversal.
-    pub async fn rows<'a>(
-        &'a self,
+    pub async fn select(
+        &self,
         range: Range<S::Id, S::Value>,
-        order: &'a [S::Id],
+        order: &[S::Id],
         reverse: bool,
-        select: Option<&'a [S::Id]>,
+        columns: &[S::Id],
     ) -> Result<Rows<S::Value>, io::Error> {
         #[cfg(feature = "logging")]
-        log::debug!("Table::rows with order {order:?}");
+        log::debug!("Table::select with order {order:?}");
 
         let range = range.into_inner();
-        let select = select.unwrap_or(self.schema.primary().columns());
         let index = self.schema.query_index(&range, order)?;
-        if select.is_empty()
-            || select
+        if columns.is_empty()
+            || columns
                 .iter()
                 .any(|column| !self.schema.primary().columns().contains(column))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid column selection: {select:?}"),
+                format!("invalid column selection: {columns:?}"),
             ));
         }
 
         self.state
-            .rows(index, range, reverse, select, self.schema.key())
+            .select(index, range, reverse, columns, self.schema.key())
             .await
-    }
-
-    /// Consume this [`TableReadGuard`] to construct a [`Stream`] of all the rows in the [`Table`].
-    pub async fn into_rows(self) -> Result<Rows<S::Value>, io::Error> {
-        self.rows(Range::default(), &[], false, None).await
     }
 }
 
-impl<S: fmt::Debug, IS, C, G> fmt::Debug for Table<S, IS, C, G> {
+impl<S: fmt::Debug, IS, C, G, O> fmt::Debug for Table<S, IS, C, G, O> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "table with schema {:?}", self.schema.inner())
     }
 }
 
-impl<S, IS, C, FE> Table<S, IS, C, DirWriteGuardOwned<FE>> {
+impl<S, IS, C, FE, O> Table<S, IS, C, DirWriteGuardOwned<FE>, O> {
     /// Downgrade this write lock to a read lock.
-    pub fn downgrade(self) -> Table<S, IS, C, Arc<DirReadGuardOwned<FE>>> {
+    pub fn downgrade(self) -> Table<S, IS, C, Arc<DirReadGuardOwned<FE>>, O> {
         Table {
             schema: self.schema,
             state: self.state.downgrade(),
@@ -202,10 +219,11 @@ impl<S, IS, C, FE> Table<S, IS, C, DirWriteGuardOwned<FE>> {
     }
 }
 
-impl<S, C, FE> Table<S, S::Index, C, DirWriteGuardOwned<FE>>
+impl<S, C, FE, O> Table<S, S::Index, C, DirWriteGuardOwned<FE>, O>
 where
     S: Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
+    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     <S as Schema>::Index: Send + Sync,
 {

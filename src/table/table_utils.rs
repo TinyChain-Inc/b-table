@@ -56,16 +56,33 @@ pub(super) fn bad_key<V: fmt::Debug>(key: &[V], key_len: usize) -> io::Error {
 }
 
 #[inline]
-pub(super) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
-    if schema.primary().columns().is_empty() {
+pub(crate) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
+    let primary = schema.primary();
+    let columns = primary.columns();
+    if columns.is_empty()
+        || schema.key().is_empty()
+        || columns.len() != b_tree::Schema::len(primary)
+        || !columns
+            .iter()
+            .eq(schema.key().iter().chain(schema.values()))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{schema:?} contains no columns"),
+            "Table primary columns must be its nonempty key followed by its values",
+        ));
+    }
+
+    let mut unique = HashSet::with_capacity(columns.len());
+    if columns.iter().any(|column| !unique.insert(column)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "duplicate Table column",
         ));
     }
 
     let mut names = HashSet::with_capacity(schema.auxiliary().len());
     for (index_name, index) in schema.auxiliary() {
+        freqfs::validate_name(index_name)?;
         if index_name == PRIMARY {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -79,10 +96,14 @@ pub(super) fn valid_schema<S: Schema>(schema: &S) -> Result<(), io::Error> {
             ));
         }
 
-        if index.columns().is_empty() {
+        let mut unique = HashSet::with_capacity(index.columns().len());
+        if index.columns().is_empty()
+            || index.columns().len() != b_tree::Schema::len(index)
+            || index.columns().iter().any(|column| !unique.insert(column))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("index {index_name} is empty"),
+                format!("index {index_name} must have unique columns matching its row width"),
             ));
         }
 

@@ -11,23 +11,24 @@ use freqfs::{DirLock, FileLoad, FileSave};
 use safecast::AsType;
 
 use super::table_state::TableState;
-use super::table_utils::valid_schema;
+use super::table_utils::bad_key;
 use super::{PRIMARY, Table, TableReadGuard, TableWriteGuard};
 use crate::schema::{Schema, TableSchema};
 use crate::{IndexStack, Node, Row};
 
 /// A futures-aware read-write lock on a [`Table`]
-pub struct TableLock<S, IS, C, FE> {
+pub struct TableLock<S, IS, C, FE, O = C> {
     schema: Arc<TableSchema<S>>,
     dir: DirLock<FE>,
-    primary: BTreeLock<IS, C, FE>,
+    primary: BTreeLock<IS, C, FE, O>,
     // use a BTreeMap to make sure index locks are always acquired in-order
-    auxiliary: BTreeMap<Arc<str>, BTreeLock<IS, C, FE>>,
+    auxiliary: BTreeMap<Arc<str>, BTreeLock<IS, C, FE, O>>,
 }
 
-impl<S, IS, C, FE> Clone for TableLock<S, IS, C, FE>
+impl<S, IS, C, FE, O> Clone for TableLock<S, IS, C, FE, O>
 where
     C: Clone,
+    O: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -39,27 +40,32 @@ where
     }
 }
 
-impl<S, IS, C, FE> TableLock<S, IS, C, FE> {
+impl<S, IS, C, FE, O> TableLock<S, IS, C, FE, O> {
     /// Borrow the [`Schema`] of this [`Table`].
     pub fn schema(&self) -> &S {
         self.schema.inner()
     }
 
-    /// Borrow the collator for this [`Table`].
-    pub fn collator(&self) -> &b_tree::Collator<C> {
-        self.primary.collator()
+    /// Borrow the ordering for this [`Table`].
+    pub fn ordering(&self) -> &b_tree::IndexOrder<C, O> {
+        self.primary.ordering()
     }
 }
 
-impl<S, C, FE> TableLock<S, S::Index, C, FE>
+impl<S, C, FE, O> TableLock<S, S::Index, C, FE, O>
 where
     S: Schema,
     C: Clone,
+    O: Clone,
     FE: AsType<Node<S::Value>> + Send + Sync + FileLoad,
 {
     /// Create a new [`Table`], admitting each index root in order.
-    pub async fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
-        valid_schema(&schema)?;
+    pub async fn create(
+        schema: S,
+        ordering: b_tree::IndexOrder<C, O>,
+        dir: DirLock<FE>,
+    ) -> Result<Self, io::Error> {
+        schema.validate()?;
 
         let mut dir_contents = dir.try_write()?;
 
@@ -72,14 +78,14 @@ where
 
         let primary = {
             let dir = dir_contents.create_dir(PRIMARY.to_string())?;
-            BTreeLock::create(schema.primary().clone(), collator.clone(), dir).await
+            BTreeLock::create(schema.primary().clone(), ordering.clone(), dir).await
         }?;
 
         let mut auxiliary = BTreeMap::new();
         for (name, schema) in schema.auxiliary() {
             let index = {
                 let dir = dir_contents.create_dir(name.to_string())?;
-                BTreeLock::create(schema.clone(), collator.clone(), dir).await
+                BTreeLock::create(schema.clone(), ordering.clone(), dir).await
             }?;
 
             auxiliary.insert(name.clone().into(), index);
@@ -96,8 +102,12 @@ where
     }
 
     /// Load an existing [`Table`] with the given `schema` from the given `dir`
-    pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
-        valid_schema(&schema)?;
+    pub fn load(
+        schema: S,
+        ordering: b_tree::IndexOrder<C, O>,
+        dir: DirLock<FE>,
+    ) -> Result<Self, io::Error> {
+        schema.validate()?;
 
         let dir_contents = dir.try_read()?;
 
@@ -105,7 +115,7 @@ where
             let dir = dir_contents.get_dir(PRIMARY).ok_or_else(|| {
                 freqfs::IntegrityError::invalid_data("missing Table primary index")
             })?;
-            BTreeLock::load(schema.primary().clone(), collator.clone(), dir.clone())
+            BTreeLock::load(schema.primary().clone(), ordering.clone(), dir.clone())
         }?;
 
         let mut auxiliary = BTreeMap::new();
@@ -114,7 +124,7 @@ where
                 let dir = dir_contents.get_dir(name).ok_or_else(|| {
                     freqfs::IntegrityError::invalid_data("missing Table auxiliary index")
                 })?;
-                BTreeLock::load(schema.clone(), collator.clone(), dir.clone())
+                BTreeLock::load(schema.clone(), ordering.clone(), dir.clone())
             }?;
 
             auxiliary.insert(name.clone().into(), index);
@@ -146,13 +156,41 @@ where
     }
 }
 
-impl<S, C, FE> TableLock<S, S::Index, C, FE>
+impl<S, C, FE, O> TableLock<S, S::Index, C, FE, O>
 where
     S: Schema + Send + Sync,
     S::Index: Send + Sync,
     C: b_tree::collate::Collate<Value = S::Value> + Clone + Send + Sync + 'static,
+    O: b_tree::collate::Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + FileLoad,
 {
+    /// Resolve one semantic primary key without acquiring auxiliary indexes.
+    pub async fn get_row(&self, key: &[S::Value]) -> io::Result<Option<Row<S::Value>>> {
+        if key.len() != self.schema.key().len() {
+            return Err(bad_key(key, self.schema.key().len()));
+        }
+        self.primary
+            .read()
+            .await
+            .get(key)
+            .await
+            .map_err(freqfs::IntegrityError::from_read)
+    }
+
+    /// Check unique primary-key presence without copying the row's values.
+    pub async fn contains(&self, key: &[S::Value]) -> io::Result<bool> {
+        if key.len() != self.schema.key().len() {
+            return Err(bad_key(key, self.schema.key().len()));
+        }
+        self.primary
+            .read()
+            .await
+            .get_with(key, |_| Ok::<_, io::Error>(()))
+            .await
+            .map(|row| row.is_some())
+            .map_err(freqfs::IntegrityError::from_read)
+    }
+
     /// Validate native indexes and their consistency before accepting storage.
     pub async fn validate(&self) -> Result<(), io::Error>
     where
@@ -229,7 +267,8 @@ where
                 // only those ties, using the capability already held by the scan.
                 if self
                     .primary
-                    .collator()
+                    .ordering()
+                    .range_collator()
                     .cmp_ref(previous.as_slice(), key)
                     .is_eq()
                 {
@@ -316,14 +355,15 @@ where
     }
 }
 
-impl<S, C, FE> TableLock<S, S::Index, C, FE>
+impl<S, C, FE, O> TableLock<S, S::Index, C, FE, O>
 where
     S: Schema,
     C: Clone,
+    O: Clone,
     FE: Send + Sync + FileLoad,
 {
     /// Lock this [`Table`] for reading.
-    pub async fn read(&self) -> TableReadGuard<S, S::Index, C, FE> {
+    pub async fn read(&self) -> TableReadGuard<S, S::Index, C, FE, O> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for reading...");
 
@@ -352,7 +392,7 @@ where
     }
 
     /// Lock this [`Table`] for reading, without borrowing.
-    pub async fn into_read(self) -> TableReadGuard<S, S::Index, C, FE> {
+    pub async fn into_read(self) -> TableReadGuard<S, S::Index, C, FE, O> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for reading...");
 
@@ -382,7 +422,7 @@ where
     }
 
     /// Lock this [`Table`] for reading synchronously, if possible.
-    pub fn try_read(&self) -> Result<TableReadGuard<S, S::Index, C, FE>, io::Error> {
+    pub fn try_read(&self) -> Result<TableReadGuard<S, S::Index, C, FE, O>, io::Error> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for reading...");
 
@@ -411,7 +451,7 @@ where
     }
 
     /// Lock this [`Table`] for writing.
-    pub async fn write(&self) -> TableWriteGuard<S, S::Index, C, FE> {
+    pub async fn write(&self) -> TableWriteGuard<S, S::Index, C, FE, O> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for writing...");
 
@@ -440,7 +480,7 @@ where
     }
 
     /// Lock this [`Table`] for writing, without borrowing.
-    pub async fn into_write(self) -> TableWriteGuard<S, S::Index, C, FE> {
+    pub async fn into_write(self) -> TableWriteGuard<S, S::Index, C, FE, O> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for reading...");
 
@@ -470,7 +510,7 @@ where
     }
 
     /// Lock this [`Table`] for writing synchronously, if possible.
-    pub fn try_write(&self) -> Result<TableWriteGuard<S, S::Index, C, FE>, io::Error> {
+    pub fn try_write(&self) -> Result<TableWriteGuard<S, S::Index, C, FE, O>, io::Error> {
         #[cfg(feature = "logging")]
         log::debug!("locking table for writing...");
 

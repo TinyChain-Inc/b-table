@@ -1,12 +1,12 @@
 use std::io;
 use std::ops::Bound;
 
+use b_table::{Range, TableLock};
 use freqfs::Cache;
 use futures::TryStreamExt;
 
 use self::adapters::{BLOCK_SIZE, Collator, File, TableSchema, Value};
 use self::directory::TestDir;
-use b_table::{Range, TableLock};
 
 #[path = "support/adapters.rs"]
 mod adapters;
@@ -50,7 +50,8 @@ async fn main() -> Result<(), io::Error> {
         ];
 
         // create the table
-        let table = TableLock::create(schema, Collator::new(), dir).await?;
+        let table =
+            TableLock::create(schema, b_tree::IndexOrder::new(Collator::new()), dir).await?;
 
         // test reading from an empty table
         {
@@ -144,7 +145,7 @@ async fn main() -> Result<(), io::Error> {
         // test reading a stream of all rows
         {
             let guard = table.read().await;
-            let mut stream = guard.rows(Range::default(), &[], false, None).await?;
+            let (mut stream, _) = guard.rows(Range::default(), &[], false).await?;
 
             assert_eq!(
                 stream.try_next().await?,
@@ -161,7 +162,7 @@ async fn main() -> Result<(), io::Error> {
                 (Bound::Unbounded, Bound::Excluded(10.into())),
             )]);
 
-            let mut stream = guard.rows(range, &[], true, None).await?;
+            let (mut stream, _) = guard.rows(range, &[], true).await?;
 
             assert_eq!(
                 stream.try_next().await?,

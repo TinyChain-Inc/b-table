@@ -16,7 +16,12 @@ async fn semantic_equal_auxiliary_entries_are_replaced() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::create(schema, Collator::new(), cache.load(path.clone())?).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )
+        .await?;
         table
             .write()
             .await
@@ -93,7 +98,12 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         std::time::Duration::from_secs(3),
     )
     .load(fixture.path().to_owned())?;
-    let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+    let table = TableLock::create(
+        schema,
+        b_tree::IndexOrder::new(Collator::new()),
+        dir.clone(),
+    )
+    .await?;
     {
         let mut writer = table.write().await;
         writer
@@ -119,8 +129,9 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
     {
         let read = table.read().await;
         assert!(
-            read.rows(range.clone(), &[], false, None)
+            read.rows(range.clone(), &[], false)
                 .await?
+                .0
                 .try_next()
                 .await?
                 .is_none()
@@ -162,7 +173,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
             }
         };
         for reverse in [false, true] {
-            let mut rows = read.rows(supported.clone(), &order, reverse, None).await?;
+            let mut rows = read.rows(supported.clone(), &order, reverse).await?.0;
             let expected = if reverse { [2, 1] } else { [1, 2] };
             for key in expected {
                 assert_eq!(
@@ -190,7 +201,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         for rejected in [multi, counted] {
             for reverse in [false, true] {
                 assert_eq!(
-                    read.rows(rejected.clone(), &[], reverse, None)
+                    read.rows(rejected.clone(), &[], reverse)
                         .await
                         .err()
                         .unwrap()
@@ -216,7 +227,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         }
         for select in [vec![], vec!["missing".to_string()]] {
             assert_eq!(
-                read.rows(supported.clone(), &["up".into()], false, Some(&select))
+                read.select(supported.clone(), &["up".into()], false, &select)
                     .await
                     .err()
                     .unwrap()
@@ -232,7 +243,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
             );
         }
         assert_eq!(
-            read.rows(supported, &["up".into()], false, None)
+            read.rows(supported, &["up".into()], false)
                 .await
                 .err()
                 .unwrap()
@@ -264,7 +275,7 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
     assert_eq!(table.read().await.count(Range::default()).await?, 2);
     {
         let read = table.read().await;
-        let mut rows = read.rows(Range::default(), &[], false, None).await?;
+        let mut rows = read.rows(Range::default(), &[], false).await?.0;
         drop(read);
         assert!(rows.try_next().await?.is_some());
         drop(rows);
@@ -312,7 +323,12 @@ async fn upsert_validates_before_mutation_and_reopens() -> io::Result<()> {
             std::time::Duration::from_secs(3),
         );
         let dir = cache.load(path.clone())?;
-        let table = TableLock::create(schema(), Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         let values = || {
             vec![
                 "name".to_string().into(),
@@ -348,7 +364,11 @@ async fn upsert_validates_before_mutation_and_reopens() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::load(schema(), Collator::new(), cache.load(path.clone())?)?;
+        let table = TableLock::load(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )?;
         table.validate().await?;
         assert!(table.read().await.get_row(&[1.into()]).await?.is_none());
         assert_eq!(
@@ -385,7 +405,12 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::create(schema(), Collator::new(), cache.load(path.clone())?).await?;
+        let table = TableLock::create(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )
+        .await?;
         {
             let mut writer = table.write().await;
             for key in 0..40 {
@@ -428,9 +453,18 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::load(schema(), Collator::new(), cache.load(path.clone())?)?;
+        let table = TableLock::load(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )?;
         table.validate().await?;
-        let mut rows = table.read().await.into_rows().await?;
+        let mut rows = table
+            .read()
+            .await
+            .rows(Range::default(), &[], false)
+            .await?
+            .0;
         assert!(table.try_write().is_err());
         let mut actual = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -449,7 +483,7 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
 }
 
 #[tokio::test]
-async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() -> io::Result<()> {
+async fn equivalent_primary_keys_remain_distinct_and_relocate_consistently() -> io::Result<()> {
     use number_general::NumberInstance;
 
     #[derive(Clone, Eq, PartialEq)]
@@ -483,7 +517,8 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
             vec!["up", "up_name", "down", "down_name"],
             [("name".into(), vec!["up_name", "up"])],
         );
-        let table = TableLock::create(schema, Magnitude, dir.clone()).await?;
+        let table =
+            TableLock::create(schema, b_tree::IndexOrder::new(Magnitude), dir.clone()).await?;
         let values =
             |name: &str| vec![name.to_string().into(), 2.into(), "note".to_string().into()];
 
@@ -523,8 +558,9 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
             let read = table.read().await;
             for reverse in [false, true] {
                 let rows = read
-                    .rows(range.clone(), &[], reverse, None)
+                    .rows(range.clone(), &[], reverse)
                     .await?
+                    .0
                     .try_collect::<Vec<_>>()
                     .await?;
                 assert_eq!(rows.len(), 1);
@@ -566,13 +602,13 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 .await?
         );
 
-        let error = table
-            .write()
-            .await
-            .upsert(vec![1.into()], values("z"))
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !table
+                .write()
+                .await
+                .upsert(vec![1.into()], values("z"))
+                .await?
+        );
         assert_eq!(
             table
                 .read()
@@ -581,10 +617,10 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 .await?
                 .unwrap()
                 .as_slice(),
-            values("a")
+            values("z")
         );
 
-        // Auxiliary publication precedes the rejected relocation of the primary row.
+        // Both primary relocation and auxiliary publication retain the new row.
         let auxiliary = dir.read().await.get_dir("name").unwrap().clone();
         let root = auxiliary
             .read()
@@ -602,7 +638,7 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 vec!["z".to_string().into(), 1.into()]
             ]
         );
-        assert!(table.validate().await.is_err());
+        table.validate().await?;
 
         drop(table);
         drop(auxiliary);
@@ -629,7 +665,12 @@ async fn ambiguous_primary_keys_fail_before_auxiliary_changes() -> io::Result<()
             std::time::Duration::from_secs(1),
         )
         .load(path.clone())?;
-        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         let values =
             |name: &str| vec![name.to_string().into(), 2.into(), "note".to_string().into()];
         // Corrupt the native fixture directly: ordinary Table upsert preserves
@@ -679,7 +720,7 @@ async fn ambiguous_primary_keys_fail_before_auxiliary_changes() -> io::Result<()
         )]);
         for reverse in [false, true] {
             let reader = table.read().await;
-            let mut rows = reader.rows(range.clone(), &[], reverse, None).await?;
+            let mut rows = reader.rows(range.clone(), &[], reverse).await?.0;
             let error = rows.try_next().await.unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert!(freqfs::IntegrityError::is_marked(&error));
@@ -737,7 +778,12 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
             std::time::Duration::from_secs(3),
         );
         let dir = cache.load(fixture.path().to_owned())?;
-        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         for key in 0..20 {
             table
                 .write()
@@ -775,7 +821,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 );
                 assert!(
                     reader
-                        .rows(Range::default(), &[], false, Some(&[]))
+                        .select(Range::default(), &[], false, &[])
                         .await
                         .is_err()
                 );
@@ -786,7 +832,11 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
         // Exercise the native index with the same clone-observed values.
         let (name, schema) = &table.schema().auxiliary()[1];
         let native = dir.read().await.get_dir(name).unwrap().clone();
-        let index = b_tree::BTreeLock::load(schema.clone(), Collator::new(), native)?;
+        let index = b_tree::BTreeLock::load(
+            schema.clone(),
+            b_tree::IndexOrder::new(Collator::new()),
+            native,
+        )?;
         super::observations::VALUE_CLONES
             .scope(std::cell::Cell::new(0), async {
                 let read = index.read().await;
@@ -830,7 +880,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                         let selection = ["down".to_string(), "up".to_string(), "up".to_string()];
                         let reader = table.read().await;
                         let mut rows = reader
-                            .rows(Range::default(), &order, reverse, Some(&selection))
+                            .select(Range::default(), &order, reverse, &selection)
                             .await?;
                         let mut expected: Vec<_> = (0..20).collect();
                         if reverse {
@@ -850,7 +900,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let reader = table.read().await;
                 let selection = ["up".to_string()];
                 let mut rows = reader
-                    .rows(Range::default(), &[], false, Some(&selection))
+                    .select(Range::default(), &[], false, &selection)
                     .await?;
                 assert_eq!(rows.try_next().await?.unwrap().as_slice(), &[0.into()]);
                 drop(reader);
@@ -873,7 +923,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                         ];
                         INDEXED_CLONES.with(|count| count.set(0));
                         let mut rows = reader
-                            .rows(Range::default(), &order, reverse, Some(&selection))
+                            .select(Range::default(), &order, reverse, &selection)
                             .await?;
                         let mut expected: Vec<_> = (0..20).collect();
                         if reverse {
@@ -898,7 +948,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
 
                 for selection in [vec![], vec!["missing".to_string()]] {
                     let error = reader
-                        .rows(Range::default(), &[], false, Some(&selection))
+                        .select(Range::default(), &[], false, &selection)
                         .await
                         .err()
                         .expect("invalid column selection");
@@ -912,7 +962,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 )]);
                 assert_eq!(
                     reader
-                        .rows(range.clone(), &["up".into()], false, None)
+                        .rows(range.clone(), &["up".into()], false)
                         .await
                         .err()
                         .unwrap()
@@ -920,7 +970,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                     io::ErrorKind::Unsupported
                 );
                 let order = ["up_name".into(), "up".into()];
-                let mut owned = reader.rows(range, &order, false, None).await?;
+                let mut owned = reader.rows(range, &order, false).await?.0;
                 let mut expected = Vec::new();
                 while let Some(row) = owned.try_next().await? {
                     expected.push(row[0].clone());
@@ -939,7 +989,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let blocked = root.write::<Node<Value>>().await?;
                 let reader = table.read().await;
                 let mut visiting = Box::pin(async {
-                    let mut rows = reader.rows(Range::default(), &[], false, None).await?;
+                    let mut rows = reader.rows(Range::default(), &[], false).await?.0;
                     rows.try_next().await
                 });
                 assert!(futures::poll!(&mut visiting).is_pending());
@@ -950,7 +1000,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 drop(table.try_write()?);
 
                 let reader = table.read().await;
-                drop(reader.rows(Range::default(), &[], false, None));
+                drop(reader.rows(Range::default(), &[], false));
                 drop(reader);
                 drop(table.try_write()?);
 
@@ -964,7 +1014,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 let columns = ["up", "up_name", "down", "down_name"].map(str::to_string);
                 let reader = table.read().await;
                 for reverse in [false, true] {
-                    let mut rows = reader.rows(range.clone(), &order, reverse, None).await?;
+                    let mut rows = reader.rows(range.clone(), &order, reverse).await?.0;
                     assert_eq!(
                         rows.try_next().await.unwrap_err().kind(),
                         io::ErrorKind::InvalidData
@@ -981,7 +1031,7 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                 for select in [vec![], vec!["absent".to_string()]] {
                     assert_eq!(
                         reader
-                            .rows(Range::default(), &[], false, Some(&select))
+                            .select(Range::default(), &[], false, &select)
                             .await
                             .err()
                             .unwrap()
@@ -1029,15 +1079,15 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
                     let reader = table.read().await;
                     assert_eq!(
                         reader
-                            .rows(range.clone(), &order, reverse, None)
+                            .rows(range.clone(), &order, reverse)
                             .await
                             .err()
                             .unwrap()
                             .kind(),
                         io::ErrorKind::Unsupported
                     );
-                    let error = match reader.rows(Range::default(), &order, reverse, None).await {
-                        Ok(mut rows) => rows.try_next().await.unwrap_err(),
+                    let error = match reader.rows(Range::default(), &order, reverse).await {
+                        Ok((mut rows, _)) => rows.try_next().await.unwrap_err(),
                         Err(error) => error,
                     };
                     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -1075,7 +1125,7 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
                     ),
                 ],
             ),
-            Collator::new(),
+            b_tree::IndexOrder::new(Collator::new()),
             Cache::<File>::new(
                 1024 * BLOCK_SIZE,
                 Some(4),
@@ -1109,7 +1159,7 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
         let read = table.read().await;
         for reverse in [false, true] {
             assert_eq!(
-                read.rows(range.clone(), &[], reverse, None)
+                read.rows(range.clone(), &[], reverse)
                     .await
                     .err()
                     .unwrap()
@@ -1117,8 +1167,9 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
                 io::ErrorKind::Unsupported
             );
             let rows = read
-                .rows(supported.clone(), &["b".into(), "a".into()], reverse, None)
-                .await?;
+                .rows(supported.clone(), &["b".into(), "a".into()], reverse)
+                .await?
+                .0;
             let owned: Vec<_> = rows.map_ok(|row| row.into_vec()).try_collect().await?;
             let mut expected: Vec<Vec<Value>> = vec![
                 vec![1.into(), 0.into(), 1.into(), 2.into()],
@@ -1168,8 +1219,9 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
         let actual: Vec<_> = table
             .read()
             .await
-            .rows(Range::default(), &[], false, None)
+            .rows(Range::default(), &[], false)
             .await?
+            .0
             .map_ok(|row| row.into_vec())
             .try_collect()
             .await?;
