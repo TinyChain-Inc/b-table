@@ -54,6 +54,11 @@ pub trait IndexSchema: BTreeSchema + Clone + Send + Sync + 'static {
 
 /// The schema of a [`Table`](crate::Table)
 pub trait Schema: Eq + Send + Sync + Sized + fmt::Debug {
+    /// Validate the native column layout and index identities before storage access.
+    fn validate(&self) -> io::Result<()> {
+        crate::table::table_utils::valid_schema(self)
+    }
+
     /// The type of human-readable identifier used by columns and indices in this [`Schema`]
     type Id: Hash + Eq + Clone + Send + Sync + fmt::Debug + fmt::Display + 'static;
 

@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn primary_point_reads_do_not_acquire_auxiliary_indexes() -> io::Result<()> {
+    let fixture = TestDir::new("primary_point_reads")?;
+    let cache = Cache::<File>::new(
+        1024 * BLOCK_SIZE,
+        None,
+        0,
+        std::time::Duration::from_secs(3),
+    );
+    let dir = cache.load(fixture.path().to_owned())?;
+    let table = TableLock::create(
+        TableSchema::new(
+            vec!["id", "label", "count", "other"],
+            [("by_label".into(), vec!["label", "id"])],
+        ),
+        b_tree::IndexOrder::new(Collator::new()),
+        dir.clone(),
+    )
+    .await?;
+    table
+        .write()
+        .await
+        .upsert(
+            vec![1.into()],
+            vec!["row".to_string().into(), 2.into(), 3.into()],
+        )
+        .await?;
+    let auxiliary = dir.read().await.get_dir("by_label").unwrap().clone();
+    let held = auxiliary.write().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        assert_eq!(
+            table.get_row(&[1.into()]).await?.unwrap()[1],
+            "row".to_string().into()
+        );
+        assert!(table.contains(&[1.into()]).await?);
+        assert!(!table.contains(&[9.into()]).await?);
+        assert!(table.get_row(&[]).await.is_err());
+        assert!(table.contains(&[]).await.is_err());
+        Ok::<_, io::Error>(())
+    })
+    .await
+    .expect("point reads must not wait for an auxiliary index")?;
+    drop(held);
+    Ok(())
+}
+
+#[tokio::test]
 async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
     const ROOT: &str = "00000000-0000-0000-0000-000000000000";
     for operation in ["insert", "update", "delete"] {
@@ -23,7 +69,12 @@ async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
                     std::time::Duration::from_secs(3),
                 )
                 .load(path.clone())?;
-                let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+                let table = TableLock::create(
+                    schema,
+                    b_tree::IndexOrder::new(Collator::new()),
+                    dir.clone(),
+                )
+                .await?;
                 let values = || {
                     vec![
                         "new".to_string().into(),
@@ -142,7 +193,12 @@ async fn auxiliary_error_releases_pending_sibling_before_primary() -> io::Result
             std::time::Duration::from_secs(3),
         )
         .load(path.clone())?;
-        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         table
             .write()
             .await

@@ -16,7 +16,12 @@ async fn semantic_equal_auxiliary_entries_are_replaced() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::create(schema, Collator::new(), cache.load(path.clone())?).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )
+        .await?;
         table
             .write()
             .await
@@ -93,7 +98,12 @@ async fn first_emptiness_and_deletion_share_the_row_predicate() -> io::Result<()
         std::time::Duration::from_secs(3),
     )
     .load(fixture.path().to_owned())?;
-    let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+    let table = TableLock::create(
+        schema,
+        b_tree::IndexOrder::new(Collator::new()),
+        dir.clone(),
+    )
+    .await?;
     {
         let mut writer = table.write().await;
         writer
@@ -312,7 +322,12 @@ async fn upsert_validates_before_mutation_and_reopens() -> io::Result<()> {
             std::time::Duration::from_secs(3),
         );
         let dir = cache.load(path.clone())?;
-        let table = TableLock::create(schema(), Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         let values = || {
             vec![
                 "name".to_string().into(),
@@ -348,7 +363,11 @@ async fn upsert_validates_before_mutation_and_reopens() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::load(schema(), Collator::new(), cache.load(path.clone())?)?;
+        let table = TableLock::load(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )?;
         table.validate().await?;
         assert!(table.read().await.get_row(&[1.into()]).await?.is_none());
         assert_eq!(
@@ -385,7 +404,12 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::create(schema(), Collator::new(), cache.load(path.clone())?).await?;
+        let table = TableLock::create(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )
+        .await?;
         {
             let mut writer = table.write().await;
             for key in 0..40 {
@@ -428,7 +452,11 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::load(schema(), Collator::new(), cache.load(path.clone())?)?;
+        let table = TableLock::load(
+            schema(),
+            b_tree::IndexOrder::new(Collator::new()),
+            cache.load(path.clone())?,
+        )?;
         table.validate().await?;
         let mut rows = table.read().await.into_rows().await?;
         assert!(table.try_write().is_err());
@@ -449,7 +477,7 @@ async fn range_deletion_uses_reordered_covering_rows() -> io::Result<()> {
 }
 
 #[tokio::test]
-async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() -> io::Result<()> {
+async fn equivalent_primary_keys_remain_distinct_and_relocate_consistently() -> io::Result<()> {
     use number_general::NumberInstance;
 
     #[derive(Clone, Eq, PartialEq)]
@@ -483,7 +511,8 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
             vec!["up", "up_name", "down", "down_name"],
             [("name".into(), vec!["up_name", "up"])],
         );
-        let table = TableLock::create(schema, Magnitude, dir.clone()).await?;
+        let table =
+            TableLock::create(schema, b_tree::IndexOrder::new(Magnitude), dir.clone()).await?;
         let values =
             |name: &str| vec![name.to_string().into(), 2.into(), "note".to_string().into()];
 
@@ -566,13 +595,13 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 .await?
         );
 
-        let error = table
-            .write()
-            .await
-            .upsert(vec![1.into()], values("z"))
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !table
+                .write()
+                .await
+                .upsert(vec![1.into()], values("z"))
+                .await?
+        );
         assert_eq!(
             table
                 .read()
@@ -581,10 +610,10 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 .await?
                 .unwrap()
                 .as_slice(),
-            values("a")
+            values("z")
         );
 
-        // Auxiliary publication precedes the rejected relocation of the primary row.
+        // Both primary relocation and auxiliary publication retain the new row.
         let auxiliary = dir.read().await.get_dir("name").unwrap().clone();
         let root = auxiliary
             .read()
@@ -602,7 +631,7 @@ async fn equivalent_primary_keys_remain_distinct_and_preserve_partial_failure() 
                 vec!["z".to_string().into(), 1.into()]
             ]
         );
-        assert!(table.validate().await.is_err());
+        table.validate().await?;
 
         drop(table);
         drop(auxiliary);
@@ -629,7 +658,12 @@ async fn ambiguous_primary_keys_fail_before_auxiliary_changes() -> io::Result<()
             std::time::Duration::from_secs(1),
         )
         .load(path.clone())?;
-        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         let values =
             |name: &str| vec![name.to_string().into(), 2.into(), "note".to_string().into()];
         // Corrupt the native fixture directly: ordinary Table upsert preserves
@@ -737,7 +771,12 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
             std::time::Duration::from_secs(3),
         );
         let dir = cache.load(fixture.path().to_owned())?;
-        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
+        let table = TableLock::create(
+            schema,
+            b_tree::IndexOrder::new(Collator::new()),
+            dir.clone(),
+        )
+        .await?;
         for key in 0..20 {
             table
                 .write()
@@ -786,7 +825,11 @@ async fn selected_columns_avoid_unselected_payload_clones() -> io::Result<()> {
         // Exercise the native index with the same clone-observed values.
         let (name, schema) = &table.schema().auxiliary()[1];
         let native = dir.read().await.get_dir(name).unwrap().clone();
-        let index = b_tree::BTreeLock::load(schema.clone(), Collator::new(), native)?;
+        let index = b_tree::BTreeLock::load(
+            schema.clone(),
+            b_tree::IndexOrder::new(Collator::new()),
+            native,
+        )?;
         super::observations::VALUE_CLONES
             .scope(std::cell::Cell::new(0), async {
                 let read = index.read().await;
@@ -1075,7 +1118,7 @@ async fn queries_require_one_supporting_index() -> io::Result<()> {
                     ),
                 ],
             ),
-            Collator::new(),
+            b_tree::IndexOrder::new(Collator::new()),
             Cache::<File>::new(
                 1024 * BLOCK_SIZE,
                 Some(4),

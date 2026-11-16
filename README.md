@@ -1,5 +1,13 @@
 # b-table
 
+`TableLock::{create, load}` and the decoding context receive an `IndexOrder`,
+re-exported from `b-tree`. It owns range collation and optional storage refinement;
+`ordering()` borrows this immutable configuration. Use `.range_collator()` for
+prefixes and ranges and `.key_collator()` for complete stored keys. Each native
+index retains that configuration; `row_collator` delegates borrowed selected-index
+columns to the key comparator before applying reverse traversal. Refinement
+applies only after every range column and key length ties, preserving range groups.
+
 A persistent database table based on
 [b-tree](https://github.com/TinyChain-Inc/b-tree), with support for multiple indices.
 
@@ -11,6 +19,13 @@ canonical storage before relying on restart loading.
 
 Auxiliary index names must be unique and cannot use the reserved name `primary`.
 Creation and loading reject invalid names before accessing storage.
+`Schema::validate` owns structural validation: primary columns are unique and
+equal the nonempty key followed by values; each index has unique known columns,
+matching native row width, and every primary-key column. Callers may use this
+same fallible validator before delegating storage.
+
+`TableLock::get_row` and `contains` acquire only the primary index, preserving
+semantic-prefix uniqueness checks. Presence checks do not clone row values.
 
 Run `cargo test --all-targets --all-features` to include the native integration tests.
 
@@ -64,13 +79,15 @@ using their chosen codec. The examples choose TBON explicitly.
 `Table::upsert` replaces an existing primary-key row and updates changed auxiliary
 entries. It returns `true` for insertion and `false` for replacement. Semantic
 equality does not suppress publication, including in auxiliary indexes.
-Primary replacement preserves row order
-and topology through native B-tree replacement. Point access resolves semantic
+Primary replacement delegates to native B-tree replacement, including relocation
+when a changed row crosses its neighbors. Point access resolves semantic
 primary-key equality within the collation group; multiple matching rows are an
 ambiguity error before mutation.
 
-Auxiliary differences are applied first; even a primary replacement rejection
-can leave partial index changes. The caller owns recovery.
+Auxiliary differences are applied first; interrupted or failed replacement
+can leave partial index changes. The caller owns recovery. `row_collator` returns
+comparison behavior for complete primary rows in the supporting index's storage
+order, using the same index-selection rule as row iteration.
 
 First-row reads and retained row streams share selected-index execution. Scoped
 reads borrow only the selected and primary indexes instead of rebuilding the

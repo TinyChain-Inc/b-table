@@ -31,8 +31,12 @@ async fn benchmark_index_mutations() -> io::Result<()> {
         {
             let cache =
                 || Cache::<File>::new(64 * 1024 * 1024, None, 0, std::time::Duration::from_secs(3));
-            let table =
-                TableLock::create(schema(), Collator::new(), cache().load(path.clone())?).await?;
+            let table = TableLock::create(
+                schema(),
+                b_tree::IndexOrder::new(Collator::new()),
+                cache().load(path.clone())?,
+            )
+            .await?;
             let emit = |operation, temperature, elapsed: std::time::Duration| {
                 println!(
                     "TABLE,indexes_{indexes},{operation},{temperature},wall,ns,{}",
@@ -82,7 +86,11 @@ async fn benchmark_index_mutations() -> io::Result<()> {
             table.sync_all().await?;
             drop(table);
 
-            let table = TableLock::load(schema(), Collator::new(), cache().load(path.clone())?)?;
+            let table = TableLock::load(
+                schema(),
+                b_tree::IndexOrder::new(Collator::new()),
+                cache().load(path.clone())?,
+            )?;
             let start = std::time::Instant::now();
             {
                 let mut table = table.write().await;
