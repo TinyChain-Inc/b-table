@@ -32,9 +32,9 @@ impl BTreeSchema for TestIndex {
         }
     }
 
-    fn validate_key(&self, key: Vec<u64>) -> io::Result<Vec<u64>> {
+    fn validate_key(&self, key: &[u64]) -> io::Result<()> {
         if key.len() == self.len() {
-            Ok(key)
+            Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,

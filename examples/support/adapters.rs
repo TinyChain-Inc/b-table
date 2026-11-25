@@ -178,9 +178,9 @@ impl BTreeSchema for IndexSchema {
         }
     }
 
-    fn validate_key(&self, key: Vec<Self::Value>) -> Result<Vec<Self::Value>, Self::Error> {
+    fn validate_key(&self, key: &[Self::Value]) -> Result<(), Self::Error> {
         if key.len() == self.len() {
-            Ok(key)
+            Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
