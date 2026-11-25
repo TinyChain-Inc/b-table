@@ -1,14 +1,13 @@
 use std::cmp::Ordering;
 use std::io;
 
+use b_table::collate::{self, Collate};
+use b_table::{BTreeSchema, IndexSchema as IndexSchemaInstance, Node};
 use destream::{de, en};
 use futures::TryStreamExt;
 use get_size::GetSize;
 use number_general::NumberCollator;
 use safecast::as_type;
-
-use b_table::collate::{self, Collate};
-use b_table::{BTreeSchema, IndexSchema as IndexSchemaInstance, Node};
 
 pub(super) const BLOCK_SIZE: usize = 4_096;
 

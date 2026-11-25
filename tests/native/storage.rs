@@ -15,7 +15,7 @@ async fn paired_rows_and_collator_share_index_order_after_guard_release() -> io:
             vec!["up", "up_name", "down", "down_name"],
             [("down".into(), vec!["down", "up"])],
         ),
-        b_tree::IndexOrder::new(Collator::new()),
+        Collator::new(),
         cache.load(fixture.path().to_owned())?,
     )
     .await?;
@@ -129,14 +129,7 @@ async fn invalid_schema_rejects_before_native_allocation_or_loading() -> io::Res
             std::time::Duration::from_secs(3),
         )
         .load(fixture.path().to_owned())?;
-        assert!(
-            TableLock::load(
-                schema,
-                b_tree::IndexOrder::new(Collator::new()),
-                dir.clone()
-            )
-            .is_err()
-        );
+        assert!(TableLock::load(schema, Collator::new(), dir.clone()).is_err());
         assert!(dir.read().await.is_empty());
     }
     let fixture = TestDir::new("duplicate_columns_create")?;
@@ -150,7 +143,7 @@ async fn invalid_schema_rejects_before_native_allocation_or_loading() -> io::Res
     assert!(
         TableLock::create(
             TableSchema::new(vec!["id", "id", "count", "other"], []),
-            b_tree::IndexOrder::new(Collator::new()),
+            Collator::new(),
             dir.clone(),
         )
         .await
@@ -191,32 +184,19 @@ async fn index_names_reject_before_storage_access() -> io::Result<()> {
             let dir = cache.load(fixture.path().to_owned())?;
             {
                 let held = dir.write().await;
-                let error = TableLock::create(
-                    schema(case),
-                    b_tree::IndexOrder::new(Collator::new()),
-                    dir.clone(),
-                )
-                .now_or_never()
-                .expect("invalid index names waited for storage")
-                .err()
-                .unwrap();
+                let error = TableLock::create(schema(case), Collator::new(), dir.clone())
+                    .now_or_never()
+                    .expect("invalid index names waited for storage")
+                    .err()
+                    .unwrap();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-                let error = TableLock::load(
-                    schema(case),
-                    b_tree::IndexOrder::new(Collator::new()),
-                    dir.clone(),
-                )
-                .err()
-                .unwrap();
+                let error = TableLock::load(schema(case), Collator::new(), dir.clone())
+                    .err()
+                    .unwrap();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                 assert!(held.is_empty());
             }
-            let table = TableLock::create(
-                schema(0),
-                b_tree::IndexOrder::new(Collator::new()),
-                dir.clone(),
-            )
-            .await?;
+            let table = TableLock::create(schema(0), Collator::new(), dir.clone()).await?;
             table
                 .write()
                 .await
@@ -233,13 +213,9 @@ async fn index_names_reject_before_storage_access() -> io::Result<()> {
             {
                 let held = dir.write().await;
                 let names: Vec<_> = held.names().cloned().collect();
-                let error = TableLock::load(
-                    schema(case),
-                    b_tree::IndexOrder::new(Collator::new()),
-                    dir.clone(),
-                )
-                .err()
-                .unwrap();
+                let error = TableLock::load(schema(case), Collator::new(), dir.clone())
+                    .err()
+                    .unwrap();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                 assert_eq!(held.names().cloned().collect::<Vec<_>>(), names);
             }
@@ -254,7 +230,7 @@ async fn index_names_reject_before_storage_access() -> io::Result<()> {
                 std::time::Duration::from_secs(3),
             )
             .load(fixture.path().to_owned())?;
-            let table = TableLock::load(schema(0), b_tree::IndexOrder::new(Collator::new()), dir)?;
+            let table = TableLock::load(schema(0), Collator::new(), dir)?;
             table.validate().boxed().await?;
             assert_eq!(
                 table
@@ -312,22 +288,17 @@ async fn strict_validation_checks_primary_keys_across_leaves_and_ties() -> io::R
                     std::time::Duration::from_secs(3),
                 )
                 .load(fixture.path().to_owned())?;
-                let table =
-                    TableLock::create(schema(), b_tree::IndexOrder::new(TiedNumbers), dir.clone())
-                        .await?;
+                let table = TableLock::create(schema(), TiedNumbers, dir.clone()).await?;
                 let primary = dir.read().await.get_dir("primary").unwrap().clone();
                 let primary = b_tree::BTreeLock::load(
                     table.schema().primary().clone(),
-                    b_tree::IndexOrder::new(TiedNumbers),
+                    TiedNumbers,
                     primary,
                 )?;
                 let (name, index_schema) = &table.schema().auxiliary()[0];
                 let auxiliary = dir.read().await.get_dir(name).unwrap().clone();
-                let auxiliary = b_tree::BTreeLock::load(
-                    index_schema.clone(),
-                    b_tree::IndexOrder::new(TiedNumbers),
-                    auxiliary,
-                )?;
+                let auxiliary =
+                    b_tree::BTreeLock::load(index_schema.clone(), TiedNumbers, auxiliary)?;
                 for position in 0..count {
                     let key = if duplicate == Some(position) {
                         0
@@ -376,7 +347,7 @@ async fn strict_validation_checks_primary_keys_across_leaves_and_ties() -> io::R
                     std::time::Duration::from_secs(3),
                 )
                 .load(fixture.path().to_owned())?;
-                let table = TableLock::load(schema(), b_tree::IndexOrder::new(TiedNumbers), dir)?;
+                let table = TableLock::load(schema(), TiedNumbers, dir)?;
                 if duplicate.is_some() {
                     let error = table.validate().boxed().await.unwrap_err();
                     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -416,12 +387,7 @@ async fn index_validation_clones_only_required_fields() -> io::Result<()> {
                 std::time::Duration::from_secs(3),
             );
             let dir = cache.load(fixture.path().to_owned())?;
-            let table = TableLock::create(
-                schema,
-                b_tree::IndexOrder::new(Collator::new()),
-                dir.clone(),
-            )
-            .await?;
+            let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
             for key in 0..20 {
                 table
                     .write()
@@ -444,20 +410,16 @@ async fn index_validation_clones_only_required_fields() -> io::Result<()> {
                     let primary = dir.read().await.get_dir("primary").unwrap().clone();
                     b_tree::BTreeLock::load(
                         table.schema().primary().clone(),
-                        b_tree::IndexOrder::new(Collator::new()),
+                        Collator::new(),
                         primary,
                     )?
                     .validate()
                     .await?;
                     for (name, schema) in table.schema().auxiliary() {
                         let native = dir.read().await.get_dir(name).unwrap().clone();
-                        b_tree::BTreeLock::load(
-                            schema.clone(),
-                            b_tree::IndexOrder::new(Collator::new()),
-                            native,
-                        )?
-                        .validate()
-                        .await?;
+                        b_tree::BTreeLock::load(schema.clone(), Collator::new(), native)?
+                            .validate()
+                            .await?;
                     }
                     let strict_clones = INDEXED_CLONES.with(std::cell::Cell::get);
                     INDEXED_CLONES.with(|count| count.set(0));
@@ -494,7 +456,7 @@ async fn variable_width_separators_rebalance_and_reopen() -> Result<(), io::Erro
         let cache = Cache::<File>::new(4 * 1024 * 1024, None, 0, std::time::Duration::from_secs(3));
         let tree = b_tree::BTreeLock::create(
             IndexSchema::new(["key"]),
-            b_tree::IndexOrder::new(Collator::new()),
+            Collator::new(),
             cache.load(path.clone())?,
         )
         .await?;
@@ -523,7 +485,7 @@ async fn variable_width_separators_rebalance_and_reopen() -> Result<(), io::Erro
         let cache = Cache::<File>::new(4 * 1024 * 1024, None, 0, std::time::Duration::from_secs(3));
         let tree = b_tree::BTreeLock::load(
             IndexSchema::new(["key"]),
-            b_tree::IndexOrder::new(Collator::new()),
+            Collator::new(),
             cache.load(path.clone())?,
         )?;
         tree.validate().await?;
@@ -570,11 +532,7 @@ async fn cancelled_index_construction_is_not_loadable() -> io::Result<()> {
         let pinned = filler.read::<Node<Value>>().await?;
         let dir = root.write().await.create_dir("table".into())?;
         {
-            let construction = TableLock::create(
-                schema(),
-                b_tree::IndexOrder::new(Collator::new()),
-                dir.clone(),
-            );
+            let construction = TableLock::create(schema(), Collator::new(), dir.clone());
             futures::pin_mut!(construction);
             assert!(futures::poll!(&mut construction).is_pending());
         }
@@ -584,7 +542,7 @@ async fn cancelled_index_construction_is_not_loadable() -> io::Result<()> {
         assert!(!primary.read().await.is_empty());
         let auxiliary = dir.read().await.get_dir("down").unwrap().clone();
         assert!(auxiliary.read().await.is_empty());
-        assert!(TableLock::load(schema(), b_tree::IndexOrder::new(Collator::new()), dir).is_err());
+        assert!(TableLock::load(schema(), Collator::new(), dir).is_err());
         drop(pinned);
         root.write().await.truncate_and_sync().await?;
     }
@@ -607,40 +565,14 @@ async fn load_requires_all_indexes() -> Result<(), io::Error> {
     {
         let cache = Cache::<File>::new(64 * BLOCK_SIZE, None, 0, std::time::Duration::from_secs(3));
         let root = cache.load(path)?;
-        assert!(
-            TableLock::load(
-                schema(),
-                b_tree::IndexOrder::new(Collator::new()),
-                root.clone()
-            )
-            .is_err()
-        );
+        assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
         assert!(root.read().await.is_empty());
-        let table = TableLock::create(
-            schema(),
-            b_tree::IndexOrder::new(Collator::new()),
-            root.clone(),
-        )
-        .await?;
+        let table = TableLock::create(schema(), Collator::new(), root.clone()).await?;
         table.sync().await?;
-        assert!(
-            TableLock::load(
-                schema(),
-                b_tree::IndexOrder::new(Collator::new()),
-                root.clone()
-            )
-            .is_ok()
-        );
+        assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_ok());
         drop(table);
         root.write().await.delete("down").await;
-        assert!(
-            TableLock::load(
-                schema(),
-                b_tree::IndexOrder::new(Collator::new()),
-                root.clone()
-            )
-            .is_err()
-        );
+        assert!(TableLock::load(schema(), Collator::new(), root.clone()).is_err());
         assert!(!root.read().await.contains("down"));
     }
 
@@ -769,11 +701,7 @@ async fn in_place_indexes_reopen_and_reject_inconsistency() -> io::Result<()> {
             std::time::Duration::from_secs(3),
         )
         .load(path.to_owned())?;
-        let table = TableLock::load(
-            schema(),
-            b_tree::IndexOrder::new(Collator::new()),
-            reopened.clone(),
-        )?;
+        let table = TableLock::load(schema(), Collator::new(), reopened.clone())?;
         table.validate().await?;
         assert_eq!(table.read().await.count(Range::default()).await?, 11);
         let auxiliary = reopened.read().await.get_dir("down").unwrap().clone();
@@ -819,12 +747,7 @@ async fn in_place_indexes_reopen_and_reject_inconsistency() -> io::Result<()> {
             0,
             std::time::Duration::from_secs(3),
         );
-        let table = TableLock::create(
-            schema(),
-            b_tree::IndexOrder::new(Collator::new()),
-            cache.load(path.clone())?,
-        )
-        .await?;
+        let table = TableLock::create(schema(), Collator::new(), cache.load(path.clone())?).await?;
         Box::pin(ingest(&table)).await?;
         Box::pin(mutate(&table)).await?;
         table.sync_all().await?;

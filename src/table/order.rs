@@ -6,35 +6,34 @@ use crate::Row;
 
 /// Comparison of full primary rows in a selected native index's storage order.
 #[derive(Clone, Eq, PartialEq)]
-pub struct RowCollator<C, O = C> {
+pub struct RowCollator<C> {
     indices: Vec<usize>,
-    ordering: b_tree::IndexOrder<C, O>,
+    collator: b_tree::RangeCollator<C>,
     reverse: bool,
 }
 
-impl<C, O> RowCollator<C, O> {
+impl<C> RowCollator<C> {
     pub(super) fn new(
         indices: Vec<usize>,
-        ordering: b_tree::IndexOrder<C, O>,
+        collator: b_tree::RangeCollator<C>,
         reverse: bool,
     ) -> Self {
         Self {
             indices,
-            ordering,
+            collator,
             reverse,
         }
     }
 }
 
-impl<C, O> Collate for RowCollator<C, O>
+impl<C> Collate for RowCollator<C>
 where
     C: Collate,
-    O: Collate<Value = C::Value>,
 {
     type Value = Row<C::Value>;
 
     fn cmp(&self, left: &Self::Value, right: &Self::Value) -> Ordering {
-        let order = self.ordering.key_collator().cmp_iter(
+        let order = self.collator.cmp_key_iter(
             self.indices.iter().map(|&i| &left[i]),
             self.indices.iter().map(|&i| &right[i]),
         );

@@ -17,7 +17,6 @@ mod adapters;
 mod directory;
 #[path = "common/observations.rs"]
 mod observations;
-
 #[path = "native/benchmark.rs"]
 mod benchmark;
 #[path = "native/concurrency.rs"]

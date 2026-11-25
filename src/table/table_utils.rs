@@ -7,9 +7,9 @@ use std::{
 
 use b_tree::Key;
 
-use super::PRIMARY;
 use crate::IndexStack;
 use crate::schema::{ColumnRange, IndexSchema, Schema};
+use super::PRIMARY;
 
 #[inline]
 fn selected_columns<'a, 'b, K, V>(

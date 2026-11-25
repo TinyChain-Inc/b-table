@@ -26,10 +26,10 @@ const PRIMARY: &str = "primary";
 pub const ROW_STACK_SIZE: usize = 32;
 
 /// A read guard acquired on a [`TableLock`]
-pub type TableReadGuard<S, IS, C, FE, O = C> = Table<S, IS, C, Arc<DirReadGuardOwned<FE>>, O>;
+pub type TableReadGuard<S, IS, C, FE> = Table<S, IS, C, Arc<DirReadGuardOwned<FE>>>;
 
 /// A write guard acquired on a [`TableLock`]
-pub type TableWriteGuard<S, IS, C, FE, O = C> = Table<S, IS, C, DirWriteGuardOwned<FE>, O>;
+pub type TableWriteGuard<S, IS, C, FE> = Table<S, IS, C, DirWriteGuardOwned<FE>>;
 
 /// The type of row returned in a [`Stream`] of [`Rows`]
 pub type Row<V> = SmallVec<[V; ROW_STACK_SIZE]>;
@@ -38,15 +38,14 @@ pub type Row<V> = SmallVec<[V; ROW_STACK_SIZE]>;
 pub type Rows<V> = Pin<Box<dyn Stream<Item = Result<Row<V>, io::Error>> + Send>>;
 
 /// A database table with support for multiple indices
-pub struct Table<S, IS, C, G, O = C> {
+pub struct Table<S, IS, C, G> {
     schema: Arc<TableSchema<S>>,
-    state: TableState<IS, C, G, O>,
+    state: TableState<IS, C, G>,
 }
 
-impl<S, IS, C, G, O> Clone for Table<S, IS, C, G, O>
+impl<S, IS, C, G> Clone for Table<S, IS, C, G>
 where
     C: Clone,
-    O: Clone,
     G: Clone,
 {
     fn clone(&self) -> Self {
@@ -57,11 +56,10 @@ where
     }
 }
 
-impl<S, C, FE, G, O> Table<S, S::Index, C, G, O>
+impl<S, C, FE, G> Table<S, S::Index, C, G>
 where
     S: Schema,
     C: Collate<Value = S::Value> + 'static,
-    O: Collate<Value = S::Value> + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + 'static,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -86,7 +84,6 @@ where
     ) -> Result<Option<Row<S::Value>>, io::Error>
     where
         C: Clone + Send + Sync,
-        O: Clone + Send + Sync,
         G: Sync,
     {
         let range = range.into_inner();
@@ -129,11 +126,10 @@ where
     }
 }
 
-impl<S, C, FE, G, O> Table<S, S::Index, C, G, O>
+impl<S, C, FE, G> Table<S, S::Index, C, G>
 where
     S: Schema,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Range<S::Id, S::Value>: fmt::Debug,
@@ -161,7 +157,7 @@ where
         range: Range<S::Id, S::Value>,
         order: &[S::Id],
         reverse: bool,
-    ) -> Result<(Rows<S::Value>, RowCollator<C, O>), io::Error> {
+    ) -> Result<(Rows<S::Value>, RowCollator<C>), io::Error> {
         let range = range.into_inner();
         let index = self.schema.query_index(&range, order)?;
         self.state
@@ -171,7 +167,7 @@ where
 
     /// Construct a [`Stream`] of the requested columns of the [`Rows`] within the given `range`.
     ///
-    /// One index must support every constraint and the literal ordering prefix.
+    /// One index must support every constraint and the literal collator prefix.
     /// Constraints are leading equalities followed by at most one range.
     /// Unsupported combinations return [`io::ErrorKind::Unsupported`] before traversal.
     pub async fn select(
@@ -203,15 +199,15 @@ where
     }
 }
 
-impl<S: fmt::Debug, IS, C, G, O> fmt::Debug for Table<S, IS, C, G, O> {
+impl<S: fmt::Debug, IS, C, G> fmt::Debug for Table<S, IS, C, G> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "table with schema {:?}", self.schema.inner())
     }
 }
 
-impl<S, IS, C, FE, O> Table<S, IS, C, DirWriteGuardOwned<FE>, O> {
+impl<S, IS, C, FE> Table<S, IS, C, DirWriteGuardOwned<FE>> {
     /// Downgrade this write lock to a read lock.
-    pub fn downgrade(self) -> Table<S, IS, C, Arc<DirReadGuardOwned<FE>>, O> {
+    pub fn downgrade(self) -> Table<S, IS, C, Arc<DirReadGuardOwned<FE>>> {
         Table {
             schema: self.schema,
             state: self.state.downgrade(),
@@ -219,11 +215,10 @@ impl<S, IS, C, FE, O> Table<S, IS, C, DirWriteGuardOwned<FE>, O> {
     }
 }
 
-impl<S, C, FE, O> Table<S, S::Index, C, DirWriteGuardOwned<FE>, O>
+impl<S, C, FE> Table<S, S::Index, C, DirWriteGuardOwned<FE>>
 where
     S: Schema + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     <S as Schema>::Index: Send + Sync,
 {
@@ -262,7 +257,7 @@ where
     ///
     /// Multiple semantic matches for a primary key are rejected before mutation.
     /// Replacement preserves primary-index order. Auxiliary changes precede primary
-    /// replacement, so ordering errors may retain partial native mutations;
+    /// replacement, so collator errors may retain partial native mutations;
     /// callers own recovery.
     pub async fn upsert(
         &mut self,

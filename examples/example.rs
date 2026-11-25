@@ -50,8 +50,7 @@ async fn main() -> Result<(), io::Error> {
         ];
 
         // create the table
-        let table =
-            TableLock::create(schema, b_tree::IndexOrder::new(Collator::new()), dir).await?;
+        let table = TableLock::create(schema, Collator::new(), dir).await?;
 
         // test reading from an empty table
         {
