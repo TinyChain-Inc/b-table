@@ -9,16 +9,15 @@ use safecast::AsType;
 
 use super::{IndexSchema, Node, Range, Schema, TableLock};
 
-struct TableVisitor<S, IS, C, FE, O> {
-    table: TableLock<S, IS, C, FE, O>,
+struct TableVisitor<S, IS, C, FE> {
+    table: TableLock<S, IS, C, FE>,
 }
 
-impl<S, IS, C, FE, O> de::Visitor for TableVisitor<S, IS, C, FE, O>
+impl<S, IS, C, FE> de::Visitor for TableVisitor<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
     IS: IndexSchema<Id = S::Id> + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
@@ -26,7 +25,7 @@ where
     Range<S::Id, S::Value>: fmt::Debug,
     IS::Error: Send + Sync,
 {
-    type Value = TableLock<S, IS, C, FE, O>;
+    type Value = TableLock<S, IS, C, FE>;
 
     fn expecting() -> &'static str {
         "a Table"
@@ -55,12 +54,11 @@ where
     }
 }
 
-impl<S, IS, C, FE, O> de::FromStream for TableLock<S, IS, C, FE, O>
+impl<S, IS, C, FE> de::FromStream for TableLock<S, IS, C, FE>
 where
     S: Schema<Index = IS> + Send + Sync + fmt::Debug,
     IS: IndexSchema<Id = S::Id> + Send + Sync,
     C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
-    O: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static + FileLoad,
     IS::Value: de::FromStream<Context = ()>,
     S::Value: de::FromStream<Context = ()>,
@@ -68,14 +66,14 @@ where
     Range<S::Id, S::Value>: fmt::Debug,
     IS::Error: Send + Sync,
 {
-    type Context = (S, b_tree::IndexOrder<C, O>, DirLock<FE>);
+    type Context = (S, C, DirLock<FE>);
 
     async fn from_stream<D: de::Decoder>(
         context: Self::Context,
         decoder: &mut D,
     ) -> Result<Self, D::Error> {
-        let (schema, ordering, dir) = context;
-        let table = TableLock::create(schema, ordering, dir)
+        let (schema, collator, dir) = context;
+        let table = TableLock::create(schema, collator, dir)
             .await
             .map_err(de::Error::custom)?;
         decoder.decode_seq(TableVisitor { table }).await

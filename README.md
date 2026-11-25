@@ -1,14 +1,12 @@
 # b-table
 
-`TableLock::{create, load}` and the decoding context receive an `IndexOrder`,
-re-exported from `b-tree`. It owns range collation and optional storage refinement;
-`ordering()` borrows this immutable configuration. Use `.range_collator()` for
-prefixes and ranges and `.key_collator()` for complete stored keys. Each native
-index retains that configuration. `rows` returns full primary rows and their
-comparator from one index selection. The comparator delegates borrowed
-selected-index columns to the key comparator before applying reverse traversal.
-Refinement applies only after every range column and key length ties, preserving
-range groups.
+`TableLock::{create, load}` and the decoding context receive one ordinary value
+comparator implementing `Collate`. Each native index retains a
+`RangeCollator<C>`, borrowed through `collator()`. It compares prefixes and ranges
+through `Collate` and `CollateRef`, and complete keys through `cmp_keys` or
+`cmp_key_iter`, including key lengths. `rows` returns full primary rows and their
+`RowCollator<C>` from one index selection. That comparator delegates borrowed
+selected-index columns to `cmp_key_iter` before applying reverse traversal.
 
 A persistent database table based on
 [b-tree](https://github.com/TinyChain-Inc/b-tree), with support for multiple indices.

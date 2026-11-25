@@ -15,7 +15,7 @@ async fn primary_point_reads_do_not_acquire_auxiliary_indexes() -> io::Result<()
             vec!["id", "label", "count", "other"],
             [("by_label".into(), vec!["label", "id"])],
         ),
-        b_tree::IndexOrder::new(Collator::new()),
+        Collator::new(),
         dir.clone(),
     )
     .await?;
@@ -69,12 +69,7 @@ async fn auxiliary_mutations_overlap_and_release_guards() -> io::Result<()> {
                     std::time::Duration::from_secs(3),
                 )
                 .load(path.clone())?;
-                let table = TableLock::create(
-                    schema,
-                    b_tree::IndexOrder::new(Collator::new()),
-                    dir.clone(),
-                )
-                .await?;
+                let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
                 let values = || {
                     vec![
                         "new".to_string().into(),
@@ -193,12 +188,7 @@ async fn auxiliary_error_releases_pending_sibling_before_primary() -> io::Result
             std::time::Duration::from_secs(3),
         )
         .load(path.clone())?;
-        let table = TableLock::create(
-            schema,
-            b_tree::IndexOrder::new(Collator::new()),
-            dir.clone(),
-        )
-        .await?;
+        let table = TableLock::create(schema, Collator::new(), dir.clone()).await?;
         table
             .write()
             .await
